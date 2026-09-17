@@ -2,19 +2,62 @@ import * as assert from 'assert';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as sinon from 'sinon';
 import {
     determineBaseLaunchProfile,
+    determineDefaultLaunchProfile,
     mergeEnvironmentVariables,
     determineArguments,
     determineWorkingDirectory,
-    determineServerReadyAction,
     readLaunchSettings,
+    expandEnvironmentVariables,
+    expandSdkEnvironmentVariables,
     LaunchSettings,
-    LaunchProfile
+    LaunchProfile,
+    hasSdkCompatibleLaunchProfileProperties
 } from '../debugger/launchProfiles';
 import { ExecutableLaunchConfiguration, EnvVar, ProjectLaunchConfiguration } from '../dcp/types';
+import { extensionLogOutputChannel } from '../utils/logging';
 
+import { removeDirectorySafely } from './testHelpers';
 suite('Launch Profile Tests', () => {
+    suite('hasSdkCompatibleLaunchProfileProperties', () => {
+        test('accepts valid SDK launch profile property types', () => {
+            assert.strictEqual(hasSdkCompatibleLaunchProfileProperties({
+                commandName: 'Project',
+                commandLineArgs: null,
+                launchBrowser: true,
+                executablePath: false,
+                workingDirectory: true,
+                useSSL: 'ignored by the SDK',
+                environmentVariables: {
+                    ASPNETCORE_ENVIRONMENT: 'Development'
+                }
+            }), true);
+            assert.strictEqual(hasSdkCompatibleLaunchProfileProperties({
+                commandName: 'Executable',
+                executablePath: '/usr/bin/dotnet',
+                launchBrowser: 'ignored by the SDK',
+                launchUrl: true
+            }), true);
+        });
+
+        test('rejects malformed SDK launch profile property types', () => {
+            const malformedProfiles = [
+                { commandName: 'Project', launchBrowser: 'yes' },
+                { commandName: 'Project', launchUrl: true },
+                { commandName: 'Project', dotnetRunMessages: null },
+                { commandName: 'Project', environmentVariables: { PORT: 5000 } },
+                { commandName: 'Executable', executablePath: false },
+                { commandName: 'Executable', workingDirectory: true }
+            ];
+
+            for (const profile of malformedProfiles) {
+                assert.strictEqual(hasSdkCompatibleLaunchProfileProperties(profile), false);
+            }
+        });
+    });
+
     suite('determineBaseLaunchProfile', () => {
         const sampleLaunchSettings: LaunchSettings = {
             profiles: {
@@ -77,6 +120,131 @@ suite('Launch Profile Tests', () => {
             assert.strictEqual(result.profile?.environmentVariables?.ASPNETCORE_ENVIRONMENT, 'Development');
         });
 
+        test('matches an explicit launch profile case-insensitively while preserving requested casing', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'development'
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, sampleLaunchSettings);
+
+            assert.strictEqual(result.profileName, 'development');
+            assert.strictEqual(result.profile?.environmentVariables?.ASPNETCORE_ENVIRONMENT, 'Development');
+        });
+
+        test('does not choose between ambiguous case-insensitive launch profile matches', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'development'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    Development: { commandName: 'Project' },
+                    DEVELOPMENT: { commandName: 'Project' }
+                }
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('does not accept an exact match when another profile differs only by casing', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'E2E'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    E2E: { commandName: 'Project' },
+                    e2e: { commandName: 'Project' }
+                }
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('does not accept duplicate profile names preserved in source order', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'E2E'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    E2E: { commandName: 'Project' }
+                },
+                profileOrder: ['E2E', 'E2E']
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('uses ordinal case matching for Turkish-I profile names', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'I'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    I: { commandName: 'Project' },
+                    '\u0131': { commandName: 'Project' }
+                }
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, launchSettings.profiles.I);
+            assert.strictEqual(result.profileName, 'I');
+        });
+
+        test('does not apply Unicode compatibility case folding to profile names', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'K'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    '\u212A': { commandName: 'Project' }
+                }
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('does not apply Unicode long S case folding to profile names', () => {
+            const launchConfig: ProjectLaunchConfiguration = {
+                type: 'project',
+                project_path: '/test/project.csproj',
+                launch_profile: 'S'
+            };
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    '\u017F': { commandName: 'Project' }
+                }
+            };
+
+            const result = determineBaseLaunchProfile(launchConfig, launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
         test('returns null when explicit launch profile specified but does not exist', () => {
             const launchConfig: ProjectLaunchConfiguration = {
                 type: 'project',
@@ -137,6 +305,122 @@ suite('Launch Profile Tests', () => {
 
             assert.strictEqual(result.profileName, 'IISExpress');
             assert.strictEqual(result.profile?.commandName, 'IISExpress');
+        });
+    });
+
+    suite('determineDefaultLaunchProfile', () => {
+        test('returns null for null launch settings', () => {
+            const result = determineDefaultLaunchProfile(null);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('returns the first Project profile when it appears before other supported profiles', () => {
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    'Development': { commandName: 'Project' },
+                    'Run': { commandName: 'Executable' }
+                }
+            };
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profileName, 'Development');
+            assert.strictEqual(result.profile?.commandName, 'Project');
+        });
+
+        test('returns an earlier Executable profile instead of a later Project profile', () => {
+            // The SDK selects the first *supported* profile, and 'Executable' is supported alongside 'Project'.
+            // An 'Executable' profile that appears first must win over a later 'Project' profile, matching what
+            // `dotnet run-api` actually applies.
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    'RunExe': {
+                        commandName: 'Executable',
+                        environmentVariables: {
+                            DOTNET_ROOT: '/exec/dotnet'
+                        }
+                    },
+                    'Development': {
+                        commandName: 'Project',
+                        environmentVariables: {
+                            ASPNETCORE_ENVIRONMENT: 'Development'
+                        }
+                    }
+                }
+            };
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profileName, 'RunExe');
+            assert.strictEqual(result.profile?.commandName, 'Executable');
+            assert.strictEqual(result.profile?.environmentVariables?.DOTNET_ROOT, '/exec/dotnet');
+        });
+
+        test('skips unsupported command names and returns the first supported profile', () => {
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    'IISExpress': { commandName: 'IISExpress' },
+                    'RunExe': { commandName: 'Executable' },
+                    'Development': { commandName: 'Project' }
+                }
+            };
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profileName, 'RunExe');
+            assert.strictEqual(result.profile?.commandName, 'Executable');
+        });
+
+        test('matches command names case-sensitively (skips a lowercased "executable")', () => {
+            // The SDK's provider table (LaunchSettings.s_providers) is ordinal/case-sensitive, so
+            // `dotnet run-api` treats a profile whose commandName is "executable" (wrong casing) as
+            // unsupported and skips it when picking the default profile. The extension must match.
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    'Run': { commandName: 'executable' }
+                }
+            };
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('returns null when no profile has a supported command name', () => {
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    'IISExpress': { commandName: 'IISExpress' }
+                }
+            };
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profile, null);
+            assert.strictEqual(result.profileName, null);
+        });
+
+        test('honors profileOrder for integer-like names instead of numeric key order', () => {
+            // The file lists the Executable profile "10" before the Project profile "2", so the SDK
+            // picks "10". JavaScript object key enumeration would instead reorder these integer-like
+            // keys to ["2", "10"] and pick "2"; profileOrder must override that to match the SDK.
+            const launchSettings: LaunchSettings = {
+                profiles: {
+                    '10': { commandName: 'Executable' },
+                    '2': { commandName: 'Project' }
+                },
+                profileOrder: ['10', '2']
+            };
+
+            // Sanity check: without profileOrder, key enumeration would visit "2" (Project) first.
+            assert.deepStrictEqual(Object.keys(launchSettings.profiles), ['2', '10']);
+
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profileName, '10');
+            assert.strictEqual(result.profile?.commandName, 'Executable');
         });
     });
 
@@ -397,13 +681,28 @@ suite('Launch Profile Tests', () => {
     });
 
     suite('determineArguments', () => {
-        test('uses run session args when provided', () => {
+        test('clones run session args when provided so token boundaries are preserved', () => {
             const baseProfileArgs = '--base-arg value';
-            const runSessionArgs = ['--session-arg', 'value'];
+            const runSessionArgs = ['--custom', 'value with spaces', '', 'literal "quote"', String.raw`C:\tools\backslash\path`];
 
             const result = determineArguments(baseProfileArgs, runSessionArgs);
 
-            assert.deepStrictEqual(result, '--session-arg value');
+            assert.deepStrictEqual(result, runSessionArgs);
+            assert.notStrictEqual(result, runSessionArgs);
+        });
+
+        test('logs only the run session argument count', () => {
+            const debugStub = sinon.stub(extensionLogOutputChannel, 'debug');
+
+            try {
+                const result = determineArguments(undefined, ['--api-key', 'secret-value']);
+
+                assert.deepStrictEqual(result, ['--api-key', 'secret-value']);
+                assert.strictEqual(debugStub.callCount, 1);
+                assert.strictEqual(debugStub.firstCall.args[0], 'Using run session arguments (count: 2)');
+            } finally {
+                debugStub.restore();
+            }
         });
 
         test('uses empty run session args when explicitly provided', () => {
@@ -412,7 +711,8 @@ suite('Launch Profile Tests', () => {
 
             const result = determineArguments(baseProfileArgs, runSessionArgs);
 
-            assert.deepStrictEqual(result, '');
+            assert.deepStrictEqual(result, []);
+            assert.notStrictEqual(result, runSessionArgs);
         });
 
         test('uses base profile args when run session args are null', () => {
@@ -425,12 +725,13 @@ suite('Launch Profile Tests', () => {
         });
 
         test('uses base profile args when run session args are undefined', () => {
-            const baseProfileArgs = '--base-arg value --flag';
+            const baseProfileArgs = '--custom "value with spaces" "" "literal \\"quote\\"" "C:\\tools\\backslash\\path"';
             const runSessionArgs = undefined;
 
             const result = determineArguments(baseProfileArgs, runSessionArgs);
 
-            assert.deepStrictEqual(result, baseProfileArgs);
+            assert.strictEqual(result, baseProfileArgs);
+            assert.strictEqual(typeof result, 'string');
         });
 
         test('returns undefined when no args available', () => {
@@ -441,17 +742,44 @@ suite('Launch Profile Tests', () => {
     });
 
     suite('determineWorkingDirectory', () => {
-        const projectPath = path.join('C:', 'project', 'MyApp.csproj');
+        const projectDir = path.resolve(path.sep, 'project');
+        const projectPath = path.join(projectDir, 'MyApp.csproj');
+        const absoluteWorkingDir = `${path.parse(projectDir).root}custom${path.sep}..${path.sep}working${path.sep}dir`;
 
         test('uses absolute working directory from launch profile', () => {
             const baseProfile: LaunchProfile = {
                 commandName: 'Project',
-                workingDirectory: path.join('C:', 'custom', 'working', 'dir')
+                workingDirectory: absoluteWorkingDir
             };
 
             const result = determineWorkingDirectory(projectPath, baseProfile);
 
-            assert.strictEqual(result, path.join('C:', 'custom', 'working', 'dir'));
+            assert.strictEqual(result, absoluteWorkingDir);
+        });
+
+        test('normalizes an absolute working directory from launch settings', () => {
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory: absoluteWorkingDir
+            };
+            const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+            const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+            assert.strictEqual(result, path.resolve(absoluteWorkingDir));
+        });
+
+        (process.platform === 'win32' ? test : test.skip)('resolves a Windows drive-relative working directory from the drive current directory', () => {
+            const workingDirectory = `${path.parse(projectDir).root.slice(0, 2)}custom`;
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory
+            };
+            const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+            const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+            assert.strictEqual(result, path.resolve(workingDirectory));
         });
 
         test('resolves relative working directory from launch profile', () => {
@@ -462,7 +790,79 @@ suite('Launch Profile Tests', () => {
 
             const result = determineWorkingDirectory(projectPath, baseProfile);
 
-            assert.strictEqual(result, path.join('C:', 'project', 'custom'));
+            assert.strictEqual(result, path.join(projectDir, 'custom'));
+        });
+
+        test('resolves relative working directory from launch settings directory', () => {
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory: 'custom'
+            };
+            const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+            const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+            assert.strictEqual(result, path.join(launchSettingsDirectory, 'custom'));
+        });
+
+        test('resolves an empty working directory to the launch settings directory', () => {
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory: ''
+            };
+            const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+            const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+            assert.strictEqual(result, launchSettingsDirectory);
+        });
+
+        test('uses SDK environment expansion for launch settings working directory', () => {
+            const environmentVariable = 'ASPIRE_TEST_SDK_WORKING_DIRECTORY';
+            const missingEnvironmentVariable = 'ASPIRE_TEST_SDK_WORKING_DIRECTORY_MISSING';
+            try {
+                process.env[environmentVariable] = 'expanded';
+                delete process.env[missingEnvironmentVariable];
+                const baseProfile: LaunchProfile = {
+                    commandName: 'Executable',
+                    workingDirectory: `%${environmentVariable}%/$(${environmentVariable})/%${missingEnvironmentVariable}%`
+                };
+                const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+                const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+                assert.strictEqual(
+                    result,
+                    path.resolve(launchSettingsDirectory, `expanded/$(${environmentVariable})/%${missingEnvironmentVariable}%`));
+            } finally {
+                delete process.env[environmentVariable];
+            }
+        });
+
+        test('matches SDK environment expansion for overlapping delimiters', () => {
+            const environmentVariable = 'ASPIRE_TEST_SDK_WORKING_DIRECTORY';
+            const missingEnvironmentVariable = 'ASPIRE_TEST_SDK_WORKING_DIRECTORY_MISSING';
+            try {
+                process.env[environmentVariable] = 'expanded';
+                delete process.env[missingEnvironmentVariable];
+                const baseProfile: LaunchProfile = {
+                    commandName: 'Executable',
+                    workingDirectory: `%${missingEnvironmentVariable}%${environmentVariable}%`
+                };
+                const launchSettingsDirectory = path.join(projectDir, 'Properties');
+
+                const result = determineWorkingDirectory(projectPath, baseProfile, launchSettingsDirectory);
+
+                assert.strictEqual(
+                    result,
+                    path.resolve(
+                        launchSettingsDirectory,
+                        process.platform === 'win32'
+                            ? `%${missingEnvironmentVariable}%${environmentVariable}%`
+                            : `%${missingEnvironmentVariable}expanded`));
+            } finally {
+                delete process.env[environmentVariable];
+            }
         });
 
         test('uses project directory when no working directory specified', () => {
@@ -472,45 +872,41 @@ suite('Launch Profile Tests', () => {
 
             const result = determineWorkingDirectory(projectPath, baseProfile);
 
-            assert.strictEqual(result, path.join('C:', 'project'));
+            assert.strictEqual(result, projectDir);
         });
 
         test('uses project directory when base profile is null', () => {
             const result = determineWorkingDirectory(projectPath, null);
 
-            assert.strictEqual(result, path.join('C:', 'project'));
-        });
-    });
-
-    suite('determineServerReadyAction', () => {
-        test('returns undefined when launchBrowser is false', () => {
-            const result = determineServerReadyAction(false, 'https://localhost:5001');
-            assert.strictEqual(result, undefined);
+            assert.strictEqual(result, projectDir);
         });
 
-        test('returns undefined when applicationUrl is undefined', () => {
-            const result = determineServerReadyAction(true, undefined);
-            assert.strictEqual(result, undefined);
+        test('expands environment variables in working directory before resolving', () => {
+            process.env['TEST_WD_ROOT'] = '/opt/app';
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory: '$(TEST_WD_ROOT)/output'
+            };
+
+            const result = determineWorkingDirectory('/dummy/project.csproj', baseProfile);
+
+            // $(TEST_WD_ROOT) expands to /opt/app, making it an absolute path
+            assert.strictEqual(result, '/opt/app/output');
+            delete process.env['TEST_WD_ROOT'];
         });
 
-        test('returns serverReadyAction when launchBrowser true and applicationUrl provided', () => {
-            const applicationUrl = 'https://localhost:5001';
-            const result = determineServerReadyAction(true, applicationUrl);
+        test('expands environment variables in relative working directory', () => {
+            process.env['TEST_WD_SUBDIR'] = 'build-output';
+            const baseProfile: LaunchProfile = {
+                commandName: 'Executable',
+                workingDirectory: '$(TEST_WD_SUBDIR)/bin'
+            };
 
-            assert.notStrictEqual(result, undefined);
-            assert.strictEqual(result?.action, 'openExternally');
-            assert.strictEqual(result?.uriFormat, applicationUrl);
-            assert.strictEqual(result?.pattern, '\\bNow listening on:\\s+https?://\\S+');
-        });
+            const result = determineWorkingDirectory('/projects/myapp/myapp.csproj', baseProfile);
 
-        test('returns serverReadyAction with first URL when multiple URLs separated by semicolon', () => {
-            const applicationUrl = 'https://localhost:5001;http://localhost:5000';
-            const result = determineServerReadyAction(true, applicationUrl);
-
-            assert.notStrictEqual(result, undefined);
-            assert.strictEqual(result?.action, 'openExternally');
-            assert.strictEqual(result?.uriFormat, 'https://localhost:5001');
-            assert.strictEqual(result?.pattern, '\\bNow listening on:\\s+https?://\\S+');
+            // $(TEST_WD_SUBDIR) expands to build-output, still relative, resolved against project dir
+            assert.strictEqual(result, path.resolve('/projects/myapp', 'build-output/bin'));
+            delete process.env['TEST_WD_SUBDIR'];
         });
     });
 
@@ -536,7 +932,7 @@ suite('Launch Profile Tests', () => {
 
         teardown(() => {
             if (fs.existsSync(tempDir)) {
-                fs.rmSync(tempDir, { recursive: true, force: true });
+                removeDirectorySafely(tempDir);
             }
         });
 
@@ -557,12 +953,51 @@ suite('Launch Profile Tests', () => {
 
             assert.notStrictEqual(result, null);
             assert.strictEqual(result!.profiles['Development'].environmentVariables!.ASPNETCORE_ENVIRONMENT, 'Development');
+            assert.strictEqual(result!.sourceDirectory, path.dirname(launchSettingsPath));
         });
 
         test('returns null when launch settings file does not exist', async () => {
             const result = await readLaunchSettings(projectPath);
 
             assert.strictEqual(result, null);
+        });
+
+        test('falls back to <ProjectName>.run.json for a project app', async () => {
+            const runJsonPath = path.join(path.dirname(projectPath), 'TestProject.run.json');
+            fs.writeFileSync(runJsonPath, JSON.stringify({
+                profiles: {
+                    fromRunJson: {
+                        commandName: 'Project',
+                        applicationUrl: 'https://localhost:7000'
+                    }
+                }
+            }, null, 2));
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(Object.keys(result!.profiles), ['fromRunJson']);
+            assert.strictEqual(result!.profiles['fromRunJson'].applicationUrl, 'https://localhost:7000');
+            assert.strictEqual(result!.sourceDirectory, path.dirname(projectPath));
+        });
+
+        test('prefers Properties/launchSettings.json over <ProjectName>.run.json for a project app', async () => {
+            fs.writeFileSync(launchSettingsPath, JSON.stringify({
+                profiles: {
+                    fromProperties: { commandName: 'Project' }
+                }
+            }, null, 2));
+            const runJsonPath = path.join(path.dirname(projectPath), 'TestProject.run.json');
+            fs.writeFileSync(runJsonPath, JSON.stringify({
+                profiles: {
+                    fromRunJson: { commandName: 'Project' }
+                }
+            }, null, 2));
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(Object.keys(result!.profiles), ['fromProperties']);
         });
 
         test('returns null when launch settings file has invalid JSON', async () => {
@@ -601,7 +1036,8 @@ suite('Launch Profile Tests', () => {
       },
       // Comment before applicationUrl
       "applicationUrl": "https://localhost:5001",
-      "launchBrowser": true
+      "launchBrowser": true,
+      "launchUrl": "https://localhost:5001/launch"
     },
     // Another profile
     "Production": {
@@ -623,7 +1059,370 @@ suite('Launch Profile Tests', () => {
             assert.strictEqual(result!.profiles['Development'].environmentVariables!.LOG_LEVEL, 'Debug');
             assert.strictEqual(result!.profiles['Development'].applicationUrl, 'https://localhost:5001');
             assert.strictEqual(result!.profiles['Development'].launchBrowser, true);
+            assert.strictEqual(result!.profiles['Development'].launchUrl, 'https://localhost:5001/launch');
             assert.strictEqual(result!.profiles['Production'].environmentVariables!.ASPNETCORE_ENVIRONMENT, 'Production');
+        });
+
+        test('reads SDK-compatible launch settings with a BOM and trailing commas', async () => {
+            const content = `\uFEFF{
+  "profiles": {
+    "Development": {
+      "commandName": "Project",
+    },
+  },
+}`;
+            fs.writeFileSync(launchSettingsPath, content);
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.notStrictEqual(result, null);
+            assert.strictEqual(result!.profiles.Development.commandName, 'Project');
+            assert.deepStrictEqual(result!.profileOrder, ['Development']);
+        });
+
+        test('uses the last duplicate top-level profiles object and its source order', async () => {
+            const content = `{
+  "profiles": {
+    "ignored": { "commandName": "Project" }
+  },
+  "profiles": {
+    "selected": { "commandName": "Project" }
+  }
+}`;
+            fs.writeFileSync(launchSettingsPath, content);
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(Object.keys(result!.profiles), ['selected']);
+            assert.deepStrictEqual(result!.profileOrder, ['selected']);
+        });
+
+        test('does not use aspire.config.json profiles for a project AppHost', async () => {
+            fs.writeFileSync(path.join(path.dirname(projectPath), 'aspire.config.json'), JSON.stringify({
+                profiles: {
+                    Development: {
+                        applicationUrl: 'https://localhost:7000'
+                    }
+                }
+            }));
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.strictEqual(result, null);
+        });
+
+        test('preserves duplicate profile values for SDK default selection', async () => {
+            const content = `{
+  "profiles": {
+    "duplicate": {
+      "commandName": "Project",
+      "environmentVariables": { "SOURCE": "first" }
+    },
+    "duplicate": {
+      "commandName": "Project",
+      "launchBrowser": "yes",
+      "environmentVariables": { "SOURCE": "second" }
+    }
+  }
+}`;
+            fs.writeFileSync(launchSettingsPath, content);
+
+            const launchSettings = await readLaunchSettings(projectPath);
+            const result = determineDefaultLaunchProfile(launchSettings);
+
+            assert.strictEqual(result.profileName, 'duplicate');
+            assert.strictEqual(result.profile?.environmentVariables?.SOURCE, 'first');
+            assert.strictEqual(result.hasInvalidProperties, false);
+        });
+
+        test('falls back to aspire.config.json profiles when .run.json does not exist for file-based app', async () => {
+            // Create a file-based app (.cs file) with no .run.json
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            // Create aspire.config.json with profiles
+            const aspireConfigPath = path.join(tempDir, 'TestProject', 'aspire.config.json');
+            const aspireConfig = {
+                appHost: { path: 'apphost.cs' },
+                profiles: {
+                    https: {
+                        applicationUrl: 'https://localhost:5001;http://localhost:5000',
+                        environmentVariables: {
+                            ASPNETCORE_ENVIRONMENT: 'Development'
+                        }
+                    },
+                    http: {
+                        applicationUrl: 'http://localhost:5000'
+                    }
+                }
+            };
+            fs.writeFileSync(aspireConfigPath, JSON.stringify(aspireConfig, null, 2));
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.notStrictEqual(result, null);
+            assert.strictEqual(Object.keys(result!.profiles).length, 2);
+            assert.strictEqual(result!.profiles['https'].applicationUrl, 'https://localhost:5001;http://localhost:5000');
+            assert.strictEqual(result!.profiles['https'].environmentVariables!.ASPNETCORE_ENVIRONMENT, 'Development');
+            assert.strictEqual(result!.profiles['https'].commandName, 'Project');
+            assert.strictEqual(result!.profiles['http'].applicationUrl, 'http://localhost:5000');
+        });
+
+        test('returns null when neither .run.json nor aspire.config.json exists for file-based app', async () => {
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.strictEqual(result, null);
+        });
+
+        test('prefers .run.json over aspire.config.json profiles for file-based app', async () => {
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            // Create both .run.json and aspire.config.json
+            const runJsonPath = path.join(tempDir, 'TestProject', 'apphost.run.json');
+            const runJson = {
+                profiles: {
+                    default: {
+                        commandName: 'Project',
+                        applicationUrl: 'https://localhost:7000'
+                    }
+                }
+            };
+            fs.writeFileSync(runJsonPath, JSON.stringify(runJson, null, 2));
+
+            const aspireConfigPath = path.join(tempDir, 'TestProject', 'aspire.config.json');
+            const aspireConfig = {
+                profiles: {
+                    default: {
+                        applicationUrl: 'https://localhost:9999'
+                    }
+                }
+            };
+            fs.writeFileSync(aspireConfigPath, JSON.stringify(aspireConfig, null, 2));
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.notStrictEqual(result, null);
+            // Should use the .run.json value, not aspire.config.json
+            assert.strictEqual(result!.profiles['default'].applicationUrl, 'https://localhost:7000');
+        });
+
+        test('reads aspire.config.json profiles with comments', async () => {
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            const aspireConfigPath = path.join(tempDir, 'TestProject', 'aspire.config.json');
+            const aspireConfigWithComments = `{
+  // AppHost configuration
+  "appHost": { "path": "apphost.cs" },
+  "profiles": {
+    "https": {
+      "applicationUrl": "https://localhost:5001", // HTTPS endpoint
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}`;
+            fs.writeFileSync(aspireConfigPath, aspireConfigWithComments);
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.notStrictEqual(result, null);
+            assert.strictEqual(result!.profiles['https'].applicationUrl, 'https://localhost:5001');
+            assert.strictEqual(result!.profiles['https'].environmentVariables!.ASPNETCORE_ENVIRONMENT, 'Development');
+        });
+
+        test('preserves file order for integer-like profile names when selecting the default profile', async () => {
+            // The Executable profile "10" appears before the Project profile "2" in the file. The .NET
+            // SDK selects the first supported profile in file order ("10"), but JavaScript object key
+            // enumeration would reorder these integer-like keys to ["2", "10"] and pick "2".
+            // readLaunchSettings must capture the source order so the extension matches `dotnet run-api`.
+            const launchSettings = `{
+  "profiles": {
+    "10": {
+      "commandName": "Executable",
+      "environmentVariables": {
+        "DOTNET_ROOT": "/exec/dotnet"
+      }
+    },
+    "2": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}`;
+
+            fs.writeFileSync(launchSettingsPath, launchSettings);
+
+            const result = await readLaunchSettings(projectPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(result!.profileOrder, ['10', '2']);
+
+            const defaultProfile = determineDefaultLaunchProfile(result);
+            assert.strictEqual(defaultProfile.profileName, '10');
+            assert.strictEqual(defaultProfile.profile?.commandName, 'Executable');
+        });
+
+        test('prefers Properties/launchSettings.json over <app>.run.json for file-based app (matches dotnet run)', async () => {
+            // The .NET SDK resolves launch settings for a file-based app by preferring
+            // Properties/launchSettings.json over <app>.run.json (LaunchSettings.TryFindLaunchSettingsFile).
+            // The extension must read the same file, otherwise determineDefaultLaunchProfile disagrees with
+            // the profile `dotnet run-api` actually applied and createProjectDebuggerExtension can launch the
+            // file-based app with the wrong (Executable-profile) program.
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            // Properties/launchSettings.json: the default profile is an Executable profile — exactly the
+            // case the run-api trust guard depends on detecting.
+            fs.writeFileSync(launchSettingsPath, JSON.stringify({
+                profiles: {
+                    fromProperties: {
+                        commandName: 'Executable',
+                        executablePath: 'some-external-tool',
+                        commandLineArgs: '--version'
+                    }
+                }
+            }, null, 2));
+
+            // <app>.run.json exists too, but must be ignored because launchSettings.json wins.
+            const runJsonPath = path.join(tempDir, 'TestProject', 'apphost.run.json');
+            fs.writeFileSync(runJsonPath, JSON.stringify({
+                profiles: {
+                    fromRunJson: {
+                        commandName: 'Project',
+                        applicationUrl: 'https://localhost:7000'
+                    }
+                }
+            }, null, 2));
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(Object.keys(result!.profiles), ['fromProperties']);
+
+            const defaultProfile = determineDefaultLaunchProfile(result);
+            assert.strictEqual(defaultProfile.profileName, 'fromProperties');
+            assert.strictEqual(defaultProfile.profile?.commandName, 'Executable');
+        });
+
+        test('falls back to <app>.run.json when Properties/launchSettings.json is absent for file-based app', async () => {
+            const fileBasedAppPath = path.join(tempDir, 'TestProject', 'apphost.cs');
+            fs.writeFileSync(fileBasedAppPath, '// test file-based app');
+
+            // No Properties/launchSettings.json is written, so the SDK (and the extension) fall back to
+            // <app>.run.json.
+            const runJsonPath = path.join(tempDir, 'TestProject', 'apphost.run.json');
+            fs.writeFileSync(runJsonPath, JSON.stringify({
+                profiles: {
+                    fromRunJson: {
+                        commandName: 'Project',
+                        applicationUrl: 'https://localhost:7000'
+                    }
+                }
+            }, null, 2));
+
+            const result = await readLaunchSettings(fileBasedAppPath);
+
+            assert.notStrictEqual(result, null);
+            assert.deepStrictEqual(Object.keys(result!.profiles), ['fromRunJson']);
+            assert.strictEqual(result!.profiles['fromRunJson'].applicationUrl, 'https://localhost:7000');
+            assert.strictEqual(result!.sourceDirectory, path.dirname(fileBasedAppPath));
+        });
+    });
+
+    suite('expandEnvironmentVariables', () => {
+        test('expands $(VAR) syntax from process.env', () => {
+            process.env['TEST_EXPAND_VAR'] = '/test/path';
+            const result = expandEnvironmentVariables('$(TEST_EXPAND_VAR)/subfolder');
+            assert.strictEqual(result, '/test/path/subfolder');
+            delete process.env['TEST_EXPAND_VAR'];
+        });
+
+        test('expands %VAR% syntax from process.env', () => {
+            process.env['TEST_EXPAND_WIN'] = 'C:\\Users\\test';
+            const result = expandEnvironmentVariables('%TEST_EXPAND_WIN%\\subfolder');
+            assert.strictEqual(result, 'C:\\Users\\test\\subfolder');
+            delete process.env['TEST_EXPAND_WIN'];
+        });
+
+        test('expands multiple variables in one string', () => {
+            process.env['TEST_HOME'] = '/home/user';
+            process.env['TEST_VERSION'] = '1.0.0';
+            const result = expandEnvironmentVariables('$(TEST_HOME)/.store/tool/$(TEST_VERSION)/content');
+            assert.strictEqual(result, '/home/user/.store/tool/1.0.0/content');
+            delete process.env['TEST_HOME'];
+            delete process.env['TEST_VERSION'];
+        });
+
+        test('replaces undefined variables with empty string', () => {
+            delete process.env['NONEXISTENT_VAR_12345'];
+            const result = expandEnvironmentVariables('prefix/$(NONEXISTENT_VAR_12345)/suffix');
+            assert.strictEqual(result, 'prefix//suffix');
+        });
+
+        test('returns string unchanged when no variables present', () => {
+            const result = expandEnvironmentVariables('/plain/path/no/vars');
+            assert.strictEqual(result, '/plain/path/no/vars');
+        });
+
+        test('expands HOME variable like AWS Lambda launch profiles use', () => {
+            const home = process.env['HOME'] ?? '';
+            const input = '$(HOME)/.dotnet/tools/.store/amazon.lambda.testtool/0.13.0/content/RuntimeSupport.dll';
+            const result = expandEnvironmentVariables(input);
+            assert.strictEqual(result, `${home}/.dotnet/tools/.store/amazon.lambda.testtool/0.13.0/content/RuntimeSupport.dll`);
+        });
+
+        test('handles mixed $(VAR) and %VAR% in same string', () => {
+            process.env['TEST_MIX_A'] = 'alpha';
+            process.env['TEST_MIX_B'] = 'beta';
+            const result = expandEnvironmentVariables('$(TEST_MIX_A)/%TEST_MIX_B%/end');
+            assert.strictEqual(result, 'alpha/beta/end');
+            delete process.env['TEST_MIX_A'];
+            delete process.env['TEST_MIX_B'];
+        });
+    });
+
+    suite('expandSdkEnvironmentVariables', () => {
+        test('reconsiders an unresolved closing delimiter on Unix', () => {
+            const platformStub = sinon.stub(process, 'platform').value('darwin');
+            try {
+                delete process.env.TEST_EXPAND_SDK_MISSING;
+
+                assert.strictEqual(
+                    expandSdkEnvironmentVariables(
+                        '%TEST_EXPAND_SDK_MISSING%TEST_EXPAND_SDK_DEFINED%',
+                        { TEST_EXPAND_SDK_DEFINED: 'expanded' }),
+                    '%TEST_EXPAND_SDK_MISSINGexpanded');
+            } finally {
+                platformStub.restore();
+            }
+        });
+
+        test('continues after an unresolved closing delimiter on Windows', () => {
+            const platformStub = sinon.stub(process, 'platform').value('win32');
+            try {
+                delete process.env.TEST_EXPAND_SDK_MISSING;
+                const environment = { test_expand_sdk_defined: 'expanded' };
+
+                assert.strictEqual(
+                    expandSdkEnvironmentVariables('%TEST_EXPAND_SDK_DEFINED%', environment),
+                    'expanded');
+                assert.strictEqual(
+                    expandSdkEnvironmentVariables(
+                        '%TEST_EXPAND_SDK_MISSING%TEST_EXPAND_SDK_DEFINED%',
+                        environment),
+                    '%TEST_EXPAND_SDK_MISSING%TEST_EXPAND_SDK_DEFINED%');
+            } finally {
+                platformStub.restore();
+            }
         });
     });
 });

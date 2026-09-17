@@ -7,9 +7,10 @@ using Aspire.Dashboard.Authentication.OtlpApiKey;
 using Aspire.Dashboard.Configuration;
 using Aspire.Dashboard.Otlp.Http;
 using Aspire.Dashboard.Otlp.Model;
-using Aspire.Dashboard.Otlp.Model.Serialization;
+using Aspire.Dashboard.Otlp.Model.MetricValues;
 using Aspire.Dashboard.Otlp.Storage;
 using Aspire.Hosting;
+using Aspire.Otlp.Serialization;
 using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -270,6 +271,101 @@ public class OtlpHttpJsonTests
         """;
 
     /// <summary>
+    /// Metrics JSON with histogram bucketCounts as numbers instead of strings.
+    /// Some OTLP exporters send small uint64 values as JSON numbers rather than strings,
+    /// even though the protojson spec requires string encoding for uint64 fields.
+    /// </summary>
+    private const string MetricsJsonWithNumericBucketCounts = """
+        {
+          "resourceMetrics": [
+            {
+              "resource": {
+                "attributes": [
+                  {
+                    "key": "service.name",
+                    "value": {
+                      "stringValue": "copilot-chat"
+                    }
+                  }
+                ]
+              },
+              "scopeMetrics": [
+                {
+                  "scope": {
+                    "name": "copilot-chat",
+                    "version": "0.45.2026042102"
+                  },
+                  "metrics": [
+                    {
+                      "name": "copilot_chat.tool.call.duration",
+                      "description": "",
+                      "unit": "",
+                      "histogram": {
+                        "aggregationTemporality": 2,
+                        "dataPoints": [
+                          {
+                            "attributes": [
+                              {
+                                "key": "gen_ai.tool.name",
+                                "value": {
+                                  "stringValue": "manage_todo_list"
+                                }
+                              }
+                            ],
+                            "bucketCounts": [
+                              0,
+                              2,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0,
+                              0
+                            ],
+                            "explicitBounds": [
+                              0,
+                              5,
+                              10,
+                              25,
+                              50,
+                              75,
+                              100,
+                              250,
+                              500,
+                              750,
+                              1000,
+                              2500,
+                              5000,
+                              7500,
+                              10000
+                            ],
+                            "count": 2,
+                            "sum": 5,
+                            "min": 2,
+                            "max": 3,
+                            "startTimeUnixNano": "1776863423819000000",
+                            "timeUnixNano": "1776864142921000000"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+        """;
+
+    /// <summary>
     /// Example metrics JSON from https://github.com/open-telemetry/opentelemetry-proto/blob/v1.9.0/examples/metrics.json
     /// </summary>
     private const string ExampleMetricsJson = """
@@ -389,7 +485,7 @@ public class OtlpHttpJsonTests
         _testOutputHelper = testOutputHelper;
     }
 
-    private static OtlpResource AssertMyServiceResource(TelemetryRepository telemetryRepository)
+    private static OtlpResource AssertMyServiceResource(ITelemetryRepository telemetryRepository)
     {
         var resources = telemetryRepository.GetResourcesByName("my.service");
         var resource = Assert.Single(resources);
@@ -425,17 +521,16 @@ public class OtlpHttpJsonTests
         Assert.NotNull(response);
 
         // Verify data was stored in the repository
-        var telemetryRepository = app.Services.GetRequiredService<TelemetryRepository>();
+        var telemetryRepository = app.Services.GetRequiredService<ITelemetryRepository>();
         var resource = AssertMyServiceResource(telemetryRepository);
 
-        var traces = telemetryRepository.GetTraces(new GetTracesRequest
+        var traces = await telemetryRepository.GetTracesAsync(new GetTracesRequest
         {
-            ResourceKey = resource.ResourceKey,
+            ResourceKeys = [resource.ResourceKey],
             StartIndex = 0,
             Count = 10,
-            FilterText = string.Empty,
             Filters = []
-        });
+        }, cancellationToken: CancellationToken.None);
         Assert.NotEmpty(traces.PagedResult.Items);
 
         var trace = traces.PagedResult.Items.First();
@@ -486,16 +581,16 @@ public class OtlpHttpJsonTests
         Assert.NotNull(response);
 
         // Verify data was stored in the repository
-        var telemetryRepository = app.Services.GetRequiredService<TelemetryRepository>();
+        var telemetryRepository = app.Services.GetRequiredService<ITelemetryRepository>();
         var resource = AssertMyServiceResource(telemetryRepository);
 
-        var logs = telemetryRepository.GetLogs(new GetLogsContext
+        var logs = await telemetryRepository.GetLogsAsync(new GetLogsContext
         {
-            ResourceKey = resource.ResourceKey,
+            ResourceKeys = [resource.ResourceKey],
             StartIndex = 0,
             Count = 10,
             Filters = []
-        });
+        }, cancellationToken: CancellationToken.None);
         Assert.NotEmpty(logs.Items);
 
         var log = logs.Items.First();
@@ -563,16 +658,16 @@ public class OtlpHttpJsonTests
         Assert.NotNull(response);
 
         // Verify data was stored in the repository (events are stored as logs)
-        var telemetryRepository = app.Services.GetRequiredService<TelemetryRepository>();
+        var telemetryRepository = app.Services.GetRequiredService<ITelemetryRepository>();
         var resource = AssertMyServiceResource(telemetryRepository);
 
-        var logs = telemetryRepository.GetLogs(new GetLogsContext
+        var logs = await telemetryRepository.GetLogsAsync(new GetLogsContext
         {
-            ResourceKey = resource.ResourceKey,
+            ResourceKeys = [resource.ResourceKey],
             StartIndex = 0,
             Count = 10,
             Filters = []
-        });
+        }, cancellationToken: CancellationToken.None);
         Assert.NotEmpty(logs.Items);
 
         var log = logs.Items.First();
@@ -613,10 +708,10 @@ public class OtlpHttpJsonTests
         Assert.NotNull(response);
 
         // Verify data was stored in the repository
-        var telemetryRepository = app.Services.GetRequiredService<TelemetryRepository>();
+        var telemetryRepository = app.Services.GetRequiredService<ITelemetryRepository>();
         var resource = AssertMyServiceResource(telemetryRepository);
 
-        var instruments = resource.GetInstrumentsSummary();
+        var instruments = telemetryRepository.GetInstrumentSummaries(resource.ResourceKey);
         Assert.Collection(instruments,
             counter =>
             {
@@ -637,6 +732,91 @@ public class OtlpHttpJsonTests
                 Assert.Equal("I am a Histogram", histogram.Description);
                 Assert.Equal("1", histogram.Unit);
             });
+    }
+
+    [Fact]
+    public async Task CallService_Metrics_NumericBucketCounts_Success()
+    {
+        // Arrange
+        await using var app = IntegrationTestHelpers.CreateDashboardWebApplication(_testOutputHelper);
+        await app.StartAsync().DefaultTimeout();
+
+        using var httpClient = IntegrationTestHelpers.CreateHttpClient($"http://{app.OtlpServiceHttpEndPointAccessor().EndPoint}");
+
+        var content = new StringContent(MetricsJsonWithNumericBucketCounts, Encoding.UTF8, OtlpHttpEndpointsBuilder.JsonContentType);
+
+        // Act
+        var responseMessage = await httpClient.PostAsync("/v1/metrics", content).DefaultTimeout();
+        responseMessage.EnsureSuccessStatusCode();
+
+        // Assert
+        Assert.Equal(OtlpHttpEndpointsBuilder.JsonContentType, responseMessage.Content.Headers.ContentType?.MediaType);
+
+        var responseBody = await responseMessage.Content.ReadAsStringAsync().DefaultTimeout();
+        Assert.NotNull(responseBody);
+
+        var response = System.Text.Json.JsonSerializer.Deserialize(responseBody, OtlpJsonSerializerContext.Default.OtlpExportMetricsServiceResponseJson);
+        Assert.NotNull(response);
+
+        var telemetryRepository = app.Services.GetRequiredService<ITelemetryRepository>();
+        var resources = telemetryRepository.GetResourcesByName("copilot-chat");
+        var resource = Assert.Single(resources);
+
+        var instruments = telemetryRepository.GetInstrumentSummaries(resource.ResourceKey);
+        var summary = Assert.Single(instruments);
+        Assert.Equal("copilot_chat.tool.call.duration", summary.Name);
+
+        var instrumentData = await telemetryRepository.GetInstrumentAsync(new GetInstrumentRequest
+        {
+            ResourceKey = resource.ResourceKey,
+            InstrumentName = "copilot_chat.tool.call.duration",
+            MeterName = "copilot-chat",
+            StartTime = DateTime.MinValue,
+            EndTime = DateTime.MaxValue
+        }, cancellationToken: CancellationToken.None);
+        Assert.NotNull(instrumentData);
+
+        var dimension = Assert.Single(instrumentData.Dimensions);
+        var metricValue = Assert.Single(dimension.Values);
+        var histogramValue = Assert.IsType<HistogramValue>(metricValue);
+
+        Assert.Equal(2UL, histogramValue.Count);
+        Assert.Equal(5.0, histogramValue.Sum);
+
+        Assert.Collection(histogramValue.ExplicitBounds,
+            b => Assert.Equal(0, b),
+            b => Assert.Equal(5, b),
+            b => Assert.Equal(10, b),
+            b => Assert.Equal(25, b),
+            b => Assert.Equal(50, b),
+            b => Assert.Equal(75, b),
+            b => Assert.Equal(100, b),
+            b => Assert.Equal(250, b),
+            b => Assert.Equal(500, b),
+            b => Assert.Equal(750, b),
+            b => Assert.Equal(1000, b),
+            b => Assert.Equal(2500, b),
+            b => Assert.Equal(5000, b),
+            b => Assert.Equal(7500, b),
+            b => Assert.Equal(10000, b));
+
+        Assert.Collection(histogramValue.Values,
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(2UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c),
+            c => Assert.Equal(0UL, c));
     }
 
     [Fact]

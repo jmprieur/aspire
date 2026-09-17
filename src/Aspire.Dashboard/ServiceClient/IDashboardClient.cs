@@ -4,13 +4,14 @@
 using System.Collections.Immutable;
 using Aspire.Dashboard.Model;
 using Aspire.DashboardService.Proto.V1;
+using Google.Protobuf.WellKnownTypes;
 
 namespace Aspire.Dashboard.ServiceClient;
 
 /// <summary>
 /// Provides data about active resources to external components, such as the dashboard.
 /// </summary>
-public interface IDashboardClient : IAsyncDisposable
+public interface IDashboardClient : IResourceRepository, IAsyncDisposable
 {
     Task WhenConnected { get; }
 
@@ -24,6 +25,26 @@ public interface IDashboardClient : IAsyncDisposable
     bool IsEnabled { get; }
 
     /// <summary>
+    /// Gets whether the selected dashboard data source is read-only.
+    /// </summary>
+    bool IsReadOnly => false;
+
+    /// <summary>
+    /// Gets the current connection state of the client to the resource service.
+    /// </summary>
+    DashboardConnectionState ConnectionState { get; }
+
+    /// <summary>
+    /// An event raised when the connection state changes. Subscribers receive the new state.
+    /// </summary>
+    event Action<DashboardConnectionState>? ConnectionStateChanged;
+
+    /// <summary>
+    /// Explicitly triggers a reconnection attempt to the resource service.
+    /// </summary>
+    Task ReconnectAsync();
+
+    /// <summary>
     /// Gets the application name advertised by the server.
     /// </summary>
     /// <remarks>
@@ -32,45 +53,34 @@ public interface IDashboardClient : IAsyncDisposable
     string ApplicationName { get; }
 
     /// <summary>
-    /// Gets the current set of resources and a stream of updates.
+    /// Gets the minimum dashboard version required by the connected AppHost,
+    /// or <see langword="null"/> if not yet known.
     /// </summary>
-    /// <remarks>
-    /// The returned subscription will not complete on its own.
-    /// Callers are required to manage the lifetime of the subscription,
-    /// using cancellation during enumeration.
-    /// </remarks>
-    Task<ResourceViewModelSubscription> SubscribeResourcesAsync(CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Gets a resource matching the specified name. This resource won't be updated with changes after it is fetched.
-    /// </summary>
-    ResourceViewModel? GetResource(string resourceName);
-
-    /// <summary>
-    /// Get the current resources.
-    /// </summary>
-    /// <returns></returns>
-    IReadOnlyList<ResourceViewModel> GetResources();
+    string? MinRequiredVersion { get; }
 
     IAsyncEnumerable<WatchInteractionsResponseUpdate> SubscribeInteractionsAsync(CancellationToken cancellationToken);
 
     Task SendInteractionRequestAsync(WatchInteractionsRequestUpdate request, CancellationToken cancellationToken);
 
+    Task<ResourceCommandResponseViewModel> ExecuteResourceCommandAsync(string resourceName, string resourceType, CommandViewModel command, ExecuteResourceCommandOptions options, CancellationToken cancellationToken);
+
+    Task<string> UploadFileAsync(Stream fileStream, string fileName, long expectedSize, int interactionId, string inputName, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Options for executing a resource command through the dashboard client.
+/// </summary>
+public sealed class ExecuteResourceCommandOptions
+{
     /// <summary>
-    /// Gets a stream of console log messages for the specified resource.
-    /// Includes messages logged both before and after this method call.
+    /// Gets the invocation arguments supplied to the command, keyed by argument name.
     /// </summary>
-    /// <remarks>
-    /// <para>The returned sequence may end when the resource terminates.
-    /// It is up to the implementation.</para>
-    /// </remarks>
-    /// <para>It is important that callers trigger <paramref name="cancellationToken"/>
-    /// so that resources owned by the sequence and its consumers can be freed.</para>
-    IAsyncEnumerable<IReadOnlyList<ResourceLogLine>> SubscribeConsoleLogs(string resourceName, CancellationToken cancellationToken);
+    public IReadOnlyDictionary<string, Value>? Arguments { get; init; }
 
-    IAsyncEnumerable<IReadOnlyList<ResourceLogLine>> GetConsoleLogs(string resourceName, CancellationToken cancellationToken);
-
-    Task<ResourceCommandResponseViewModel> ExecuteResourceCommandAsync(string resourceName, string resourceType, CommandViewModel command, CancellationToken cancellationToken);
+    /// <summary>
+    /// Gets a value indicating whether command execution should fail instead of prompting for missing input.
+    /// </summary>
+    public bool NonInteractive { get; init; }
 }
 
 public sealed record ResourceViewModelSubscription(

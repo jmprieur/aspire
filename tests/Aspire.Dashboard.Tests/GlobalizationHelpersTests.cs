@@ -3,6 +3,7 @@
 
 using System.Globalization;
 using Aspire.Dashboard.Utils;
+using Humanizer;
 using Xunit;
 
 namespace Aspire.Dashboard.Tests;
@@ -28,6 +29,26 @@ public class GlobalizationHelpersTests
         Assert.Contains("en-GB", supportedCultures);
         Assert.Contains("fr-CA", supportedCultures);
         Assert.Contains("zh-CN", supportedCultures);
+    }
+
+    [Fact]
+    public void OrderedLocalizedCultures_HasUniqueDisplayNames()
+    {
+        var displayNames = GlobalizationHelpers.OrderedLocalizedCultures
+            .Select(c => c.NativeName.Humanize())
+            .ToList();
+
+        Assert.Equal(displayNames.Count, displayNames.Distinct().Count());
+    }
+
+    [Theory]
+    [InlineData("", "en")]
+    [InlineData("en-US", "en-US")]
+    public void GetHtmlLanguageName_ReturnsExpectedLanguage(string cultureName, string expectedLanguageName)
+    {
+        var culture = CultureInfo.GetCultureInfo(cultureName);
+
+        Assert.Equal(expectedLanguageName, GlobalizationHelpers.GetHtmlLanguageName(culture));
     }
 
     [Theory]
@@ -71,6 +92,8 @@ public class GlobalizationHelpersTests
     [InlineData("en", "en-XX", "en")]
     [InlineData("de", "en-US", null)]
     [InlineData("zh-Hans", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7", "zh-CN")]
+    [InlineData("zh-Hans", "zh-CN", "zh-CN")]
+    [InlineData("zh-Hans", "zh-CN,zh;q=0.9", "zh-CN")]
     public async Task ResolveSetCultureToAcceptedCultureAsync_MatchRequestToResult(string requestedLanguage, string acceptLanguage, string? result)
     {
         // Arrange

@@ -1,0 +1,29 @@
+{
+  "name": "typescript-api-service",
+  "version": "1.0.0",
+  "description": "TypeScript API service for Azure Functions E2E sample",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/app.ts",
+    "dev": "tsx watch src/app.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@azure/event-hubs": "^6.0.3",
+    "@azure/storage-blob": "12.31.0",
+    "@azure/storage-queue": "12.29.0",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@azure/core-rest-pipeline": "1.23.0",
+    "@azure/storage-common": "12.3.0",
+    "fast-xml-parser": "5.11.1",
+    "body-parser@<2": "1.20.6"
+  }
+}

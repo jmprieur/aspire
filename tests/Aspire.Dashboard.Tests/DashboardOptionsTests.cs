@@ -5,7 +5,9 @@ using System.Security.Claims;
 using System.Text.Json;
 using Aspire.Dashboard.Configuration;
 using Aspire.Hosting;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -41,6 +43,51 @@ public sealed class DashboardOptionsTests
 
         Assert.Null(result.FailureMessage);
         Assert.True(result.Succeeded);
+        Assert.Equal(DashboardPersistenceMode.None, GetValidOptions().Data.PersistenceMode);
+    }
+
+    [Fact]
+    public void PostConfigure_MapsDashboardRunStorageEnvironmentAliases()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [DashboardConfigNames.DashboardApplicationName.EnvVarName] = "My Dashboard",
+                [DashboardConfigNames.DashboardDataDirectoryName.EnvVarName] = "/data/.aspire/dashboard",
+                [DashboardConfigNames.DashboardPersistenceModeName.EnvVarName] = "resume"
+            })
+            .Build();
+        var options = new DashboardOptions
+        {
+            ApplicationName = "Section Name",
+            Data = new DashboardDataOptions { Directory = "/section/path" }
+        };
+
+        new PostConfigureDashboardOptions(configuration).PostConfigure(null, options);
+
+        Assert.Equal("My Dashboard", options.ApplicationName);
+        Assert.Equal("/data/.aspire/dashboard", options.Data.Directory);
+        Assert.Equal(DashboardPersistenceMode.Resume, options.Data.PersistenceMode);
+    }
+
+    [Fact]
+    public void PostConfigure_InvalidDashboardPersistenceMode_IsInvalid()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [DashboardConfigNames.DashboardPersistenceModeName.EnvVarName] = "invalid"
+            })
+            .Build();
+        var options = GetValidOptions();
+
+        new PostConfigureDashboardOptions(configuration).PostConfigure(null, options);
+        var result = new ValidateDashboardOptions().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(
+            "Failed to parse dashboard persistence mode 'invalid'. Possible values: None, Run, Resume.",
+            result.FailureMessage);
     }
 
     #region Frontend options
@@ -325,6 +372,32 @@ public sealed class DashboardOptionsTests
         Assert.Equal(2, claimIdentity.Claims.Count());
         Assert.True(claimIdentity.HasClaim("role", "admin"));
         Assert.True(claimIdentity.HasClaim("role", "test"));
+    }
+
+    [Fact]
+    public async Task OpenIdConnectOptions_UsesDashboardCookieManager()
+    {
+        await using var app = new DashboardWebApplication(builder => builder.Configuration.AddInMemoryCollection(
+        [
+            new("ASPNETCORE_URLS", "http://localhost:8000/"),
+            new("ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL", "http://localhost:4319/"),
+            new("Authentication:Schemes:OpenIdConnect:Authority", "https://id.aspire.dev/"),
+            new("Authentication:Schemes:OpenIdConnect:ClientId", "aspire-dashboard"),
+            new("Dashboard:Frontend:AuthMode", "OpenIdConnect")
+        ]));
+        var cookieOptions = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>().Get(CookieAuthenticationDefaults.AuthenticationScheme);
+        Assert.Equal(".Aspire.Dashboard.Auth", cookieOptions.Cookie.Name);
+
+        var httpContext = new DefaultHttpContext();
+        cookieOptions.CookieManager.AppendResponseCookie(httpContext, cookieOptions.Cookie.Name!, "value", new CookieOptions());
+        var httpCookie = Assert.Single(httpContext.Response.Headers.SetCookie);
+        Assert.StartsWith(".Aspire.Dashboard.Auth.Http=", httpCookie, StringComparison.Ordinal);
+
+        var httpsContext = new DefaultHttpContext();
+        httpsContext.Request.Scheme = "https";
+        cookieOptions.CookieManager.AppendResponseCookie(httpsContext, cookieOptions.Cookie.Name!, "value", new CookieOptions());
+        var httpsCookie = Assert.Single(httpsContext.Response.Headers.SetCookie);
+        Assert.StartsWith(".Aspire.Dashboard.Auth=", httpsCookie, StringComparison.Ordinal);
     }
 
     [Fact]

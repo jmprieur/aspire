@@ -1,0 +1,14 @@
+{
+  "appHost": {
+    "path": "apphost.py",
+    "language": "python"
+  },
+  "features": {
+    "experimentalPolyglot:python": true
+  },
+  "packages": {
+    "Aspire.Hosting.Azure.Sql": "",
+    "Aspire.Hosting.Azure.Provisioning.Sql": "",
+    "Aspire.Hosting.Azure.Storage": ""
+  }
+}

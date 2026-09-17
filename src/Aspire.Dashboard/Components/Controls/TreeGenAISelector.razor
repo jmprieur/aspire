@@ -1,17 +1,26 @@
-﻿@using Metrics = Aspire.Dashboard.Resources.Metrics
+﻿@using Aspire.Dashboard.Resources
+@using Metrics = Aspire.Dashboard.Resources.Metrics
 
-<FluentTreeView Class="genai-message-tree" @bind-CurrentSelected="@PageViewModel.SelectedTreeItem" @bind-CurrentSelected:after="HandleSelectedTreeItemChangedAsync">
+<FluentTreeView Class="genai-message-tree"
+                aria-label="@Loc[nameof(Dialogs.GenAIMessageTreeLabel)]"
+                Size="TreeSize.Medium"
+                SelectedId="@GetSelectedTreeItemId()"
+                @bind-CurrentSelected="@PageViewModel.SelectedTreeItem"
+                @bind-CurrentSelected:after="HandleSelectedTreeItemChangedAsync">
     <ChildContent>
-        <FluentTreeItem @key="@PageViewModel.Span" Data="@PageViewModel.Span" title="@PageViewModel.Span.Name" InitiallySelected="@(SelectedItem is null)">
-            <span class="llm-badge">LLM</span> @PageViewModel.Span.Name
+        <FluentTreeItem @key="@PageViewModel.Span"
+                        Id="genai-span"
+                        Data="@PageViewModel.Span"
+                        title="@PageViewModel.Span.Name">
+            <span class="llm-badge">@Loc[nameof(Dialogs.GenAILLMBadgeText)]</span> @PageViewModel.Span.Name
         </FluentTreeItem>
 
         @foreach (var itemVM in PageViewModel.Items)
         {
             <FluentTreeItem @key="itemVM"
+                            Id="@GetItemTreeItemId(itemVM.Index)"
                             Data="@itemVM.Index"
-                            title="@itemVM.GetTitleBadge(Loc).Text"
-                            InitiallySelected="@(itemVM.Index == SelectedItem?.Index)">
+                            title="@itemVM.GetTitleBadge(Loc).Text">
                 <div class="message-tree-item-container">
                     <GenAIItemTitle Item="itemVM" ResourceName="@itemVM.ResourceName" />
                 </div>

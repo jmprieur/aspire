@@ -1,26 +1,37 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Aspire.Dashboard.Model;
+using Aspire.Dashboard.ServiceClient;
 using Aspire.DashboardService.Proto.V1;
+using Google.Protobuf.WellKnownTypes;
 
 namespace Aspire.Dashboard.Tests.Shared;
 
 public class TestDashboardClient : IDashboardClient
 {
+    private DashboardConnectionState _connectionState = DashboardConnectionState.Connected;
     private readonly Func<string, Channel<IReadOnlyList<ResourceLogLine>>>? _consoleLogsChannelProvider;
     private readonly Func<Channel<IReadOnlyList<ResourceViewModelChange>>>? _resourceChannelProvider;
     private readonly Func<Channel<WatchInteractionsResponseUpdate>>? _interactionChannelProvider;
     private readonly Channel<ResourceCommandResponseViewModel>? _resourceCommandsChannel;
+    private readonly Func<string, string, CommandViewModel, ExecuteResourceCommandOptions, CancellationToken, Task<ResourceCommandResponseViewModel>>? _executeResourceCommand;
     private readonly Channel<WatchInteractionsRequestUpdate>? _sendInteractionUpdateChannel;
     private readonly IList<ResourceViewModel>? _initialResources;
 
     public bool IsEnabled { get; }
+    public bool IsReadOnly { get; }
     public Task WhenConnected { get; }
     public string ApplicationName { get; } = "TestApp";
+    public string? MinRequiredVersion => null;
+    public DashboardConnectionState ConnectionState => _connectionState;
+    public ConcurrentQueue<(IReadOnlyList<string> ResourceNames, DateTime ClearDate)> ClearedConsoleLogs { get; } = new();
+    public event Action<DashboardConnectionState>? ConnectionStateChanged;
+    public Task ReconnectAsync() => Task.CompletedTask;
 
     public TestDashboardClient(
         bool? isEnabled = false,
@@ -29,17 +40,21 @@ public class TestDashboardClient : IDashboardClient
         Func<Channel<IReadOnlyList<ResourceViewModelChange>>>? resourceChannelProvider = null,
         Func<Channel<WatchInteractionsResponseUpdate>>? interactionChannelProvider = null,
         Channel<ResourceCommandResponseViewModel>? resourceCommandsChannel = null,
+        Func<string, string, CommandViewModel, ExecuteResourceCommandOptions, CancellationToken, Task<ResourceCommandResponseViewModel>>? executeResourceCommand = null,
         Channel<WatchInteractionsRequestUpdate>? sendInteractionUpdateChannel = null,
         IList<ResourceViewModel>? initialResources = null,
-        Task? whenConnected = null)
+        Task? whenConnected = null,
+        bool isReadOnly = false)
     {
         IsEnabled = isEnabled ?? false;
+        IsReadOnly = isReadOnly;
         ApplicationName = applicationName ?? "TestApp";
         WhenConnected = whenConnected ?? Task.CompletedTask;
         _consoleLogsChannelProvider = consoleLogsChannelProvider;
         _resourceChannelProvider = resourceChannelProvider;
         _interactionChannelProvider = interactionChannelProvider;
         _resourceCommandsChannel = resourceCommandsChannel;
+        _executeResourceCommand = executeResourceCommand;
         _sendInteractionUpdateChannel = sendInteractionUpdateChannel;
         _initialResources = initialResources;
     }
@@ -49,14 +64,30 @@ public class TestDashboardClient : IDashboardClient
         return default;
     }
 
-    public Task<ResourceCommandResponseViewModel> ExecuteResourceCommandAsync(string resourceName, string resourceType, CommandViewModel command, CancellationToken cancellationToken)
+    public void SetConnectionState(DashboardConnectionState state)
     {
+        _connectionState = state;
+        ConnectionStateChanged?.Invoke(state);
+    }
+
+    public Task<ResourceCommandResponseViewModel> ExecuteResourceCommandAsync(string resourceName, string resourceType, CommandViewModel command, ExecuteResourceCommandOptions options, CancellationToken cancellationToken)
+    {
+        if (_executeResourceCommand is not null)
+        {
+            return _executeResourceCommand(resourceName, resourceType, command, options, cancellationToken);
+        }
+
         if (_resourceCommandsChannel == null)
         {
             throw new InvalidOperationException("No resource command channel set.");
         }
 
         return _resourceCommandsChannel.Reader.ReadAsync(cancellationToken).AsTask();
+    }
+
+    public Task<string> UploadFileAsync(Stream fileStream, string fileName, long expectedSize, int interactionId, string inputName, CancellationToken cancellationToken)
+    {
+        return Task.FromResult(Guid.NewGuid().ToString("N"));
     }
 
     public async IAsyncEnumerable<IReadOnlyList<ResourceLogLine>> SubscribeConsoleLogs(string resourceName, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -87,6 +118,12 @@ public class TestDashboardClient : IDashboardClient
         {
             yield return item;
         }
+    }
+
+    public Task ClearConsoleLogsAsync(IReadOnlyList<string> resourceNames, DateTime clearDate)
+    {
+        ClearedConsoleLogs.Enqueue((resourceNames, clearDate));
+        return Task.CompletedTask;
     }
 
     public Task<ResourceViewModelSubscription> SubscribeResourcesAsync(CancellationToken cancellationToken)

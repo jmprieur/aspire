@@ -1,29 +1,15 @@
 # Create your first Aspire app
 
-[Create a new Aspire project](command:aspire-vscode.new) to scaffold a new solution from a starter template.
-The starter template gives you:
-- An **apphost** that orchestrates your services, connections, and startup order
-- A sample **API service** with health checks
-- A **web frontend** that references the API
+Choose a starter for your stack, or begin with an empty AppHost.
 
-**The apphost** is the heart of your app — it defines everything in code:
+> [Create a new Aspire project](command:aspire-vscode.new)
 
-```csharp
-var builder = DistributedApplication.CreateBuilder(args);
-var apiService = builder.AddProject<Projects.AspireApp_ApiService>("apiservice")
-    .WithHttpHealthCheck("/health");
-builder.AddProject<Projects.AspireApp_Web>("webfrontend")
-    .WithExternalHttpEndpoints()
-    .WithReference(apiService)    // web app can call the API
-    .WaitFor(apiService);         // start API first
-builder.Build().Run();
-```
+Your AppHost is the map of your app:
 
-| Method | What it does |
-|---|---|
-| `AddProject` | Registers a service |
-| `WithReference` | Connects services |
-| `WaitFor` | Controls startup order |
-| `WithHttpHealthCheck` | Monitors health |
+- **Resources** describe services, containers, databases, and front ends.
+- **Connections** make dependencies and configuration explicit.
+- **Startup order:** Explicit wait relationships control when dependent resources start.
 
-Your application topology is defined in code, making it easy to understand, modify, and version control. [Learn more on aspire.dev](https://aspire.dev/get-started/first-app/)
+Because the app model lives in code, it stays readable, type-safe, and versioned with the rest of your app.
+
+[Build your first Aspire app](https://aspire.dev/get-started/first-app/)

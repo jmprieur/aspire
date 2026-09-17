@@ -66,4 +66,46 @@ public interface IContainerRuntime
     /// <param name="password">The password for authentication.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     Task LoginToRegistryAsync(string registryServer, string username, string password, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Starts compose services in detached mode.
+    /// </summary>
+    /// <param name="context">The compose operation parameters.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <exception cref="DistributedApplicationException">Thrown when the compose up command fails.</exception>
+    Task ComposeUpAsync(ComposeOperationContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Stops and removes compose services.
+    /// </summary>
+    /// <param name="context">The compose operation parameters.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <exception cref="DistributedApplicationException">Thrown when the compose down command fails.</exception>
+    Task ComposeDownAsync(ComposeOperationContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists the running services in a compose environment with their port mappings.
+    /// </summary>
+    /// <param name="context">The compose operation parameters.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>A list of running services, or <c>null</c> if the query could not be completed.</returns>
+    Task<IReadOnlyList<ComposeServiceInfo>?> ComposeListServicesAsync(ComposeOperationContext context, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Inspects a container image configuration.
+    /// </summary>
+    /// <param name="imageName">The image name or reference to inspect.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The image configuration inspection result.</returns>
+    Task<ContainerImageConfigInspectionResult> InspectImageConfigAsync(string imageName, CancellationToken cancellationToken)
+        => Task.FromResult(ContainerImageConfigInspectionResult.Unsupported);
+
+    /// <summary>
+    /// Inspects a container image manifest.
+    /// </summary>
+    /// <param name="imageName">The image name or reference to inspect.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The image manifest inspection result.</returns>
+    Task<ContainerImageManifestInspectionResult> InspectImageManifestAsync(string imageName, CancellationToken cancellationToken)
+        => Task.FromResult(ContainerImageManifestInspectionResult.Unsupported);
 }

@@ -1,0 +1,47 @@
+import aspire.*;
+
+void main() throws Exception {
+        var builder = DistributedApplication.CreateBuilder();
+        var nodeApp = builder.addNodeApp("node-app", "./node-app", "server.js");
+        nodeApp.withNpm(new WithNpmOptions().install(false).installCommand("install").installArgs(new String[] { "--ignore-scripts" }));
+        nodeApp.withBun(new WithBunOptions().install(false).installArgs(new String[] { "--frozen-lockfile" }));
+        nodeApp.withYarn(new WithYarnOptions().install(false).installArgs(new String[] { "--immutable" }));
+        nodeApp.withPnpm(new WithPnpmOptions().install(false).installArgs(new String[] { "--frozen-lockfile" }));
+        nodeApp.withBuildScript("build", new String[] { "--mode", "production" });
+        nodeApp.withRunScript("dev", new String[] { "--host", "0.0.0.0" });
+        nodeApp.name();
+        nodeApp.command();
+        nodeApp.workingDirectory();
+        var javaScriptApp = builder.addJavaScriptApp("javascript-app", "./javascript-app", "start");
+        javaScriptApp.withEnvironment("NODE_ENV", "development");
+        javaScriptApp.name();
+        javaScriptApp.command();
+        javaScriptApp.workingDirectory();
+        var viteApp = builder.addViteApp("vite-app", "./vite-app", "dev");
+        viteApp.withViteConfig("./vite.custom.config.ts");
+        viteApp.withPnpm(new WithPnpmOptions().install(false).installArgs(new String[] { "--prod" }));
+        viteApp.withBuildScript("build", new String[] { "--mode", "production" });
+        viteApp.withRunScript("dev", new String[] { "--host" });
+        viteApp.name();
+        viteApp.command();
+        viteApp.workingDirectory();
+        var denoApp = builder.addDenoApp("deno-app", "./deno-app", "main.ts");
+        denoApp.withDeno(new WithDenoOptions().install(false).installArgs(new String[] { "--cached-only" }));
+        denoApp.withDenoAllowAll(false);
+        denoApp.withDenoAllow(DenoPermissionKind.NET, new String[] { "localhost:8000" });
+        denoApp.withDenoDeny(DenoPermissionKind.READ, new String[] { "./secrets" });
+        denoApp.withDenoConfig("./deno.json");
+        denoApp.withDenoImportMap("./import_map.json");
+        denoApp.withDenoLock("./deno.lock");
+        denoApp.withDenoNoLock();
+        denoApp.withDenoNodeModulesDir(DenoNodeModulesDirMode.AUTO);
+        denoApp.withDenoUnstable(new String[] { "kv", "worker-options" });
+        denoApp.withDenoWatch(true);
+        denoApp.withDenoInspect(new WithDenoInspectOptions().mode(DenoInspectMode.INSPECT_WAIT).hostPort("127.0.0.1:9229"));
+        denoApp.withDenoRun();
+        denoApp.withDenoTask("dev");
+        denoApp.withDenoServe();
+        denoApp.withDenoScriptArgs(new String[] { "--port", "8000" });
+        denoApp.withDenoRuntimeArgs(new String[] { "--quiet" });
+        builder.build().run();
+    }

@@ -1,0 +1,587 @@
+﻿// Resource: api-identity
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+resource api_identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
+  name: take('api_identity-${uniqueString(resourceGroup().id)}', 128)
+  location: location
+}
+
+output id string = api_identity.id
+
+output clientId string = api_identity.properties.clientId
+
+output principalId string = api_identity.properties.principalId
+
+output principalName string = api_identity.name
+
+output name string = api_identity.name
+
+// Resource: api-roles-sql
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param sql_outputs_name string
+
+param sql_outputs_sqlserveradminname string
+
+param myvnet_outputs_acisubnet_id string
+
+param depscriptstorage_outputs_name string
+
+param principalId string
+
+param principalName string
+
+param pesubnet_sql_pe_outputs_name string
+
+param pesubnet_files_pe_outputs_name string
+
+resource sql 'Microsoft.Sql/servers@2023-08-01' existing = {
+  name: sql_outputs_name
+}
+
+resource sqlServerAdmin 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: sql_outputs_sqlserveradminname
+}
+
+resource depscriptstorage 'Microsoft.Storage/storageAccounts@2024-01-01' existing = {
+  name: depscriptstorage_outputs_name
+}
+
+resource mi 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: principalName
+}
+
+resource pesubnet_sql_pe 'Microsoft.Network/privateEndpoints@2025-05-01' existing = {
+  name: pesubnet_sql_pe_outputs_name
+}
+
+resource pesubnet_files_pe 'Microsoft.Network/privateEndpoints@2025-05-01' existing = {
+  name: pesubnet_files_pe_outputs_name
+}
+
+resource script_sql_db 'Microsoft.Resources/deploymentScripts@2023-08-01' = {
+  name: take('script-${uniqueString('sql', principalName, 'db', resourceGroup().id)}', 24)
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${sqlServerAdmin.id}': { }
+    }
+  }
+  kind: 'AzurePowerShell'
+  properties: {
+    azPowerShellVersion: '14.0'
+    retentionInterval: 'PT1H'
+    containerSettings: {
+      subnetIds: [
+        {
+          id: myvnet_outputs_acisubnet_id
+        }
+      ]
+    }
+    environmentVariables: [
+      {
+        name: 'DBNAME'
+        value: 'db'
+      }
+      {
+        name: 'DBSERVER'
+        value: sql.properties.fullyQualifiedDomainName
+      }
+      {
+        name: 'PRINCIPALTYPE'
+        value: 'ServicePrincipal'
+      }
+      {
+        name: 'PRINCIPALNAME'
+        value: principalName
+      }
+      {
+        name: 'ID'
+        value: mi.properties.clientId
+      }
+    ]
+    scriptContent: '\$sqlServerFqdn = "\$env:DBSERVER"\n\$sqlDatabaseName = "\$env:DBNAME"\n\$principalName = "\$env:PRINCIPALNAME"\n\$id = "\$env:ID"\n\n# The principal name is interpolated into a T-SQL string literal below. For a user principal\n# it is a UPN, which can legitimately contain an apostrophe (for example o\'brien@contoso.com),\n# so double it up to keep the literal well formed.\n\$escapedPrincipalName = \$principalName.Replace("\'", "\'\'")\n\n\$sqlCmd = @"\nDECLARE @name SYSNAME = \'\$escapedPrincipalName\';\nDECLARE @id UNIQUEIDENTIFIER = \'\$id\';\n\n-- The SID of an Entra principal is the raw bytes of its object id. @castId is that same\n-- value rendered as the 0x... literal that CREATE USER ... WITH SID requires.\nDECLARE @sid VARBINARY(16) = CONVERT(VARBINARY(16), @id);\nDECLARE @castId NVARCHAR(MAX) = CONVERT(VARCHAR(MAX), @sid, 1);\n\n-- Reconciliation below can drop and recreate the principal, so run the whole sequence as a\n-- single unit. XACT_ABORT rolls the transaction back on any error, so a failure between\n-- DROP USER and CREATE USER cannot leave the database with no user for this identity.\nSET XACT_ABORT ON;\nBEGIN TRANSACTION;\n\n-- Only external (Entra) users are considered, because that is the only kind this script\n-- creates. sys.database_principals also holds SQL users, Windows users, roles and dbo, and\n-- any of those sharing this name would have a different sid and so look stale - dropping a\n-- principal we do not own, along with its permissions. Ignoring them leaves @existingSid\n-- null, so CREATE USER below fails with \'Msg 15023: User already exists in current\n-- database\', which is a visible failure rather than a destructive one.\nDECLARE @existingSid VARBINARY(85) = (SELECT sid FROM sys.database_principals WHERE name = @name AND type = \'E\');\n\n-- A user left over from an earlier deployment can carry a stale SID, because deleting and\n-- recreating a managed identity keeps the name but changes the object id. Granting a role to\n-- that principal would report success while the application still failed to log in, so drop\n-- it and let it be recreated against the identity we were actually given.\nIF @existingSid IS NOT NULL AND @existingSid <> @sid\nBEGIN\n    -- QUOTENAME escapes any \']\' in the identifier, which a raw \'[\' + @name + \']\' would not.\n    DECLARE @dropCmd NVARCHAR(MAX) = N\'DROP USER \' + QUOTENAME(@name);\n    EXEC (@dropCmd);\n    SET @existingSid = NULL;\nEND\n\n-- Only create the user when it is missing. This script is re-executed on redeploys, and the\n-- retry loop below can also re-run this batch after a transient failure that occurred *after*\n-- the user was already created. An unguarded CREATE USER would then fail with\n-- \'Msg 15023: User already exists in current database\', turning a transient error into a\n-- permanent deployment failure.\nIF @existingSid IS NULL\nBEGIN\n    -- Construct command: CREATE USER [@name] WITH SID = @castId, TYPE = E;\n    DECLARE @cmd NVARCHAR(MAX) = N\'CREATE USER \' + QUOTENAME(@name) + N\' WITH SID = \' + @castId + N\', TYPE = E;\'\n    EXEC (@cmd);\nEND\n\n-- Assign roles to the user. ALTER ROLE ... ADD MEMBER is a no-op when the principal is already a member.\nDECLARE @role1 NVARCHAR(MAX) = N\'ALTER ROLE db_owner ADD MEMBER \' + QUOTENAME(@name);\nEXEC (@role1);\n\nCOMMIT TRANSACTION;\n\n"@\n# Note: the string terminator must not have whitespace before it, therefore it is not indented.\n\nWrite-Host \$sqlCmd\n\n# This script deliberately avoids the SqlServer PowerShell module (Invoke-Sqlcmd). The Azure\n# deployment script host imports the Az modules before running user scripts, and Az.Resources\n# ships Microsoft.Extensions.Caching.Memory 2.2.0. Importing SqlServer afterwards makes its\n# Always Encrypted Azure Key Vault provider - which is registered unconditionally on the first\n# Invoke-Sqlcmd call, even though nothing here uses Always Encrypted - bind against that older\n# assembly and fail with:\n#   System.MissingMethodException: Method not found: \'Void Microsoft.Extensions.Caching.Memory.MemoryCache..ctor(\n#     Microsoft.Extensions.Options.IOptions`1<Microsoft.Extensions.Caching.Memory.MemoryCacheOptions>)\'.\n# Both published SqlServer module versions have hit this class of conflict at some point, and\n# upstream tracks the real fix - proper assembly load context isolation - in\n# https://github.com/microsoft/SQLServerPSModule/issues/31, which is still open. Pinning a module\n# version only works against one combination of Az module and .NET runtime versions in the image:\n# 22.3.0 worked until this image bumped its Az modules, and 22.4.5.1 could not load on the older\n# .NET 6 based images (https://github.com/microsoft/aspire/issues/9926). Rather than track that\n# matrix, use System.Data.SqlClient, which ships in-box with PowerShell in the\n# azuredeploymentscripts-powershell images, together with a managed identity access token.\n# Nothing here needs Always Encrypted. See https://github.com/microsoft/aspire/issues/18892.\n# The token audience is cloud specific - US Gov uses database.usgovcloudapi.net and China uses\n# database.chinacloudapi.cn - so derive it from the deployment script\'s Az context rather than\n# assuming public cloud. The previous Invoke-Sqlcmd implementation used\n# \'Authentication=Active Directory Default\', which let the driver resolve this automatically.\n\$sqlDnsSuffix = (Get-AzContext).Environment.SqlDatabaseDnsSuffix\nif ([string]::IsNullOrWhiteSpace(\$sqlDnsSuffix)) {\n    \$sqlDnsSuffix = ".database.windows.net"\n}\n\$sqlAudience = "https://" + \$sqlDnsSuffix.TrimStart(\'.\') + "/"\n\n\$connectionString = "Server=tcp:\${sqlServerFqdn},1433;Initial Catalog=\${sqlDatabaseName};Encrypt=True;TrustServerCertificate=False;"\n\n\$maxRetries = 5\n\$retryDelay = 60\n\$attempt = 0\n\$success = \$false\n\nwhile (-not \$success -and \$attempt -lt \$maxRetries) {\n    \$attempt++\n    Write-Host "Attempt \$attempt of \$maxRetries..."\n    \$connection = \$null\n    try {\n        # Acquired inside the loop so a transient token failure is retried like any other\n        # failure, rather than aborting the script before the first attempt.\n        \$tokenResponse = Get-AzAccessToken -ResourceUrl \$sqlAudience\n\n        # Az.Accounts 5.x returns the token as a SecureString, earlier majors return a plain string.\n        \$accessToken = if (\$tokenResponse.Token -is [System.Security.SecureString]) {\n            [System.Net.NetworkCredential]::new("", \$tokenResponse.Token).Password\n        } else {\n            \$tokenResponse.Token\n        }\n\n        \$connection = New-Object System.Data.SqlClient.SqlConnection\n        \$connection.ConnectionString = \$connectionString\n        \$connection.AccessToken = \$accessToken\n        \$connection.Open()\n\n        \$command = \$connection.CreateCommand()\n        \$command.CommandText = \$sqlCmd\n        [void]\$command.ExecuteNonQuery()\n\n        \$success = \$true\n        Write-Host "SQL command succeeded on attempt \$attempt."\n    } catch {\n        Write-Host "Attempt \$attempt failed: \$_"\n        if (\$attempt -lt \$maxRetries) {\n            Write-Host "Retrying in \$retryDelay seconds..."\n            Start-Sleep -Seconds \$retryDelay\n        } else {\n            throw\n        }\n    } finally {\n        if (\$null -ne \$connection) {\n            \$connection.Dispose()\n        }\n    }\n}'
+    storageAccountSettings: {
+      storageAccountName: depscriptstorage_outputs_name
+    }
+  }
+  dependsOn: [
+    pesubnet_sql_pe
+    pesubnet_files_pe
+  ]
+}
+
+// Resource: depscriptstorage
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+resource depscriptstorage 'Microsoft.Storage/storageAccounts@2024-01-01' = {
+  name: take('depscriptstorage${uniqueString(resourceGroup().id)}', 24)
+  kind: 'StorageV2'
+  location: location
+  sku: {
+    name: 'Standard_GRS'
+  }
+  properties: {
+    accessTier: 'Hot'
+    allowSharedKeyAccess: true
+    isHnsEnabled: false
+    minimumTlsVersion: 'TLS1_2'
+    networkAcls: {
+      defaultAction: 'Deny'
+    }
+    publicNetworkAccess: 'Disabled'
+  }
+  tags: {
+    'aspire-resource-name': 'depscriptstorage'
+  }
+}
+
+output blobEndpoint string = depscriptstorage.properties.primaryEndpoints.blob
+
+output dataLakeEndpoint string = depscriptstorage.properties.primaryEndpoints.dfs
+
+output queueEndpoint string = depscriptstorage.properties.primaryEndpoints.queue
+
+output tableEndpoint string = depscriptstorage.properties.primaryEndpoints.table
+
+output name string = depscriptstorage.name
+
+output id string = depscriptstorage.id
+
+// Resource: env
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param userPrincipalId string = ''
+
+param tags object = { }
+
+param env_acr_outputs_name string
+
+resource env_mi 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
+  name: take('env_mi-${uniqueString(resourceGroup().id)}', 128)
+  location: location
+  tags: tags
+}
+
+resource env_acr 'Microsoft.ContainerRegistry/registries@2025-04-01' existing = {
+  name: env_acr_outputs_name
+}
+
+resource env_acr_env_mi_AcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(env_acr.id, env_mi.id, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d'))
+  properties: {
+    principalId: env_mi.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+    principalType: 'ServicePrincipal'
+  }
+  scope: env_acr
+}
+
+resource env_law 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
+  name: take('envlaw-${uniqueString(resourceGroup().id)}', 63)
+  location: location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+  }
+  tags: tags
+}
+
+resource env 'Microsoft.App/managedEnvironments@2025-07-01' = {
+  name: take('env${uniqueString(resourceGroup().id)}', 24)
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: env_law.properties.customerId
+        sharedKey: env_law.listKeys().primarySharedKey
+      }
+    }
+    workloadProfiles: [
+      {
+        name: 'consumption'
+        workloadProfileType: 'Consumption'
+      }
+    ]
+  }
+  tags: tags
+}
+
+resource aspireDashboard 'Microsoft.App/managedEnvironments/dotNetComponents@2025-10-02-preview' = {
+  name: 'aspire-dashboard'
+  properties: {
+    componentType: 'AspireDashboard'
+  }
+  parent: env
+}
+
+output AZURE_LOG_ANALYTICS_WORKSPACE_NAME string = env_law.name
+
+output AZURE_LOG_ANALYTICS_WORKSPACE_ID string = env_law.id
+
+output AZURE_CONTAINER_REGISTRY_NAME string = env_acr.name
+
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = env_acr.properties.loginServer
+
+output AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID string = env_mi.id
+
+output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = env.name
+
+output AZURE_CONTAINER_APPS_ENVIRONMENT_ID string = env.id
+
+output AZURE_CONTAINER_APPS_ENVIRONMENT_DEFAULT_DOMAIN string = env.properties.defaultDomain
+
+// Resource: env-acr
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+resource env_acr 'Microsoft.ContainerRegistry/registries@2025-04-01' = {
+  name: take('envacr${uniqueString(resourceGroup().id)}', 50)
+  location: location
+  sku: {
+    name: 'Basic'
+  }
+  tags: {
+    'aspire-resource-name': 'env-acr'
+  }
+}
+
+output name string = env_acr.name
+
+output loginServer string = env_acr.properties.loginServer
+
+output id string = env_acr.id
+
+// Resource: myvnet
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+resource myvnet 'Microsoft.Network/virtualNetworks@2025-05-01' = {
+  name: take('myvnet-${uniqueString(resourceGroup().id)}', 64)
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.0.0.0/16'
+      ]
+    }
+  }
+  location: location
+  tags: {
+    'aspire-resource-name': 'myvnet'
+  }
+}
+
+resource pesubnet 'Microsoft.Network/virtualNetworks/subnets@2025-05-01' = {
+  name: 'pesubnet'
+  properties: {
+    addressPrefix: '10.0.1.0/24'
+  }
+  parent: myvnet
+}
+
+resource acisubnet 'Microsoft.Network/virtualNetworks/subnets@2025-05-01' = {
+  name: 'acisubnet'
+  properties: {
+    addressPrefix: '10.0.2.0/29'
+    delegations: [
+      {
+        properties: {
+          serviceName: 'Microsoft.ContainerInstance/containerGroups'
+        }
+        name: 'Microsoft.ContainerInstance/containerGroups'
+      }
+    ]
+  }
+  parent: myvnet
+  dependsOn: [
+    pesubnet
+  ]
+}
+
+output pesubnet_Id string = pesubnet.id
+
+output acisubnet_Id string = acisubnet.id
+
+output id string = myvnet.id
+
+output name string = myvnet.name
+
+// Resource: pesubnet-files-pe
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param privatelink_file_core_windows_net_outputs_name string
+
+param myvnet_outputs_pesubnet_id string
+
+param depscriptstorage_outputs_id string
+
+resource privatelink_file_core_windows_net 'Microsoft.Network/privateDnsZones@2024-06-01' existing = {
+  name: privatelink_file_core_windows_net_outputs_name
+}
+
+resource pesubnet_files_pe 'Microsoft.Network/privateEndpoints@2025-05-01' = {
+  name: take('pesubnet_files_pe-${uniqueString(resourceGroup().id)}', 64)
+  location: location
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        properties: {
+          privateLinkServiceId: depscriptstorage_outputs_id
+          groupIds: [
+            'file'
+          ]
+        }
+        name: 'pesubnet-files-pe-connection'
+      }
+    ]
+    subnet: {
+      id: myvnet_outputs_pesubnet_id
+    }
+  }
+  tags: {
+    'aspire-resource-name': 'pesubnet-files-pe'
+  }
+}
+
+resource pesubnet_files_pe_dnsgroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2025-05-01' = {
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink_file_core_windows_net'
+        properties: {
+          privateDnsZoneId: privatelink_file_core_windows_net.id
+        }
+      }
+    ]
+  }
+  parent: pesubnet_files_pe
+}
+
+output id string = pesubnet_files_pe.id
+
+output name string = pesubnet_files_pe.name
+
+// Resource: pesubnet-sql-pe
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param privatelink_database_windows_net_outputs_name string
+
+param myvnet_outputs_pesubnet_id string
+
+param sql_outputs_id string
+
+resource privatelink_database_windows_net 'Microsoft.Network/privateDnsZones@2024-06-01' existing = {
+  name: privatelink_database_windows_net_outputs_name
+}
+
+resource pesubnet_sql_pe 'Microsoft.Network/privateEndpoints@2025-05-01' = {
+  name: take('pesubnet_sql_pe-${uniqueString(resourceGroup().id)}', 64)
+  location: location
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        properties: {
+          privateLinkServiceId: sql_outputs_id
+          groupIds: [
+            'sqlServer'
+          ]
+        }
+        name: 'pesubnet-sql-pe-connection'
+      }
+    ]
+    subnet: {
+      id: myvnet_outputs_pesubnet_id
+    }
+  }
+  tags: {
+    'aspire-resource-name': 'pesubnet-sql-pe'
+  }
+}
+
+resource pesubnet_sql_pe_dnsgroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2025-05-01' = {
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'privatelink_database_windows_net'
+        properties: {
+          privateDnsZoneId: privatelink_database_windows_net.id
+        }
+      }
+    ]
+  }
+  parent: pesubnet_sql_pe
+}
+
+output id string = pesubnet_sql_pe.id
+
+output name string = pesubnet_sql_pe.name
+
+// Resource: privatelink-database-windows-net
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param myvnet_outputs_id string
+
+resource privatelink_database_windows_net 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.database.windows.net'
+  location: 'global'
+  tags: {
+    'aspire-resource-name': 'privatelink-database-windows-net'
+  }
+}
+
+resource myvnet_link 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  name: 'myvnet-link'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: myvnet_outputs_id
+    }
+  }
+  tags: {
+    'aspire-resource-name': 'privatelink-database-windows-net-myvnet-link'
+  }
+  parent: privatelink_database_windows_net
+}
+
+output id string = privatelink_database_windows_net.id
+
+output name string = 'privatelink.database.windows.net'
+
+// Resource: privatelink-file-core-windows-net
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param myvnet_outputs_id string
+
+resource privatelink_file_core_windows_net 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: 'privatelink.file.core.windows.net'
+  location: 'global'
+  tags: {
+    'aspire-resource-name': 'privatelink-file-core-windows-net'
+  }
+}
+
+resource myvnet_link 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  name: 'myvnet-link'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: myvnet_outputs_id
+    }
+  }
+  tags: {
+    'aspire-resource-name': 'privatelink-file-core-windows-net-myvnet-link'
+  }
+  parent: privatelink_file_core_windows_net
+}
+
+output id string = privatelink_file_core_windows_net.id
+
+output name string = 'privatelink.file.core.windows.net'
+
+// Resource: sql
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+resource sqlServerAdminManagedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
+  name: take('sql-admin-${uniqueString(resourceGroup().id)}', 63)
+  location: location
+}
+
+resource sql 'Microsoft.Sql/servers@2023-08-01' = {
+  name: take('sql-${uniqueString(resourceGroup().id)}', 63)
+  location: location
+  properties: {
+    administrators: {
+      administratorType: 'ActiveDirectory'
+      login: sqlServerAdminManagedIdentity.name
+      sid: sqlServerAdminManagedIdentity.properties.principalId
+      tenantId: subscription().tenantId
+      azureADOnlyAuthentication: true
+    }
+    minimalTlsVersion: '1.2'
+    publicNetworkAccess: 'Disabled'
+    version: '12.0'
+  }
+  tags: {
+    'aspire-resource-name': 'sql'
+  }
+}
+
+resource db 'Microsoft.Sql/servers/databases@2023-08-01' = {
+  name: 'db'
+  location: location
+  properties: {
+    freeLimitExhaustionBehavior: 'AutoPause'
+    useFreeLimit: true
+  }
+  sku: {
+    name: 'GP_S_Gen5_2'
+  }
+  parent: sql
+}
+
+output sqlServerFqdn string = sql.properties.fullyQualifiedDomainName
+
+output name string = sql.name
+
+output id string = sql.id
+
+output sqlServerAdminName string = sql.properties.administrators.login
+
+// Resource: sql-admin-identity
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param sql_outputs_sqlserveradminname string
+
+resource sql_admin_identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: sql_outputs_sqlserveradminname
+}
+
+output id string = sql_admin_identity.id
+
+output clientId string = sql_admin_identity.properties.clientId
+
+output principalId string = sql_admin_identity.properties.principalId
+
+output principalName string = sql_admin_identity.name
+
+output name string = sql_admin_identity.name
+
+// Resource: sql-admin-identity-roles-depscriptstorage
+@description('The location for the resource(s) to be deployed.')
+param location string = resourceGroup().location
+
+param depscriptstorage_outputs_name string
+
+param principalId string
+
+resource depscriptstorage 'Microsoft.Storage/storageAccounts@2024-01-01' existing = {
+  name: depscriptstorage_outputs_name
+}
+
+resource depscriptstorage_StorageFileDataPrivilegedContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(depscriptstorage.id, principalId, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '69566ab7-960f-475b-8e7c-b3118f30c6bd'))
+  properties: {
+    principalId: principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '69566ab7-960f-475b-8e7c-b3118f30c6bd')
+    principalType: 'ServicePrincipal'
+  }
+  scope: depscriptstorage
+}
+

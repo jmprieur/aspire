@@ -26,6 +26,15 @@ public sealed class ValidateDashboardOptions : IValidateOptions<DashboardOptions
 
         var errorMessages = new List<string>();
 
+        if (options.Data.PersistenceModeParseError is { } persistenceModeParseError)
+        {
+            errorMessages.Add(persistenceModeParseError);
+        }
+        else if (!Enum.IsDefined(options.Data.PersistenceMode))
+        {
+            errorMessages.Add($"Unexpected dashboard persistence mode: {options.Data.PersistenceMode}");
+        }
+
         if (!options.Frontend.TryParseOptions(out var frontendParseErrorMessage))
         {
             errorMessages.Add(frontendParseErrorMessage);
@@ -98,12 +107,6 @@ public sealed class ValidateDashboardOptions : IValidateOptions<DashboardOptions
             }
         }
 
-        if (!options.Mcp.TryParseOptions(out var mcpParseErrorMessage))
-        {
-            errorMessages.Add(mcpParseErrorMessage);
-        }
-
-        // Parse Dashboard API options
         if (!options.Api.TryParseOptions(out var apiParseErrorMessage))
         {
             errorMessages.Add(apiParseErrorMessage);
@@ -111,24 +114,14 @@ public sealed class ValidateDashboardOptions : IValidateOptions<DashboardOptions
 
         // Validate API auth configuration
         var effectiveApiAuthMode = options.Api.AuthMode;
-        // Also check MCP-specific AuthMode for backward compatibility
-        if (effectiveApiAuthMode is null && options.Mcp.AuthMode is not null)
-        {
-            effectiveApiAuthMode = options.Mcp.AuthMode switch
-            {
-                McpAuthMode.ApiKey => ApiAuthMode.ApiKey,
-                McpAuthMode.Unsecured => ApiAuthMode.Unsecured,
-                _ => null
-            };
-        }
 
         if (effectiveApiAuthMode is ApiAuthMode.ApiKey)
         {
-            // Check if any API key is configured (either in Api or Mcp section)
-            var hasApiKey = !string.IsNullOrEmpty(options.Api.PrimaryApiKey) || !string.IsNullOrEmpty(options.Mcp.PrimaryApiKey);
-            if (!hasApiKey)
+            // PrimaryApiKey should always be present when AuthMode is ApiKey because
+            // PostConfigureDashboardOptions generates a key when one isn't specified.
+            if (string.IsNullOrEmpty(options.Api.PrimaryApiKey))
             {
-                errorMessages.Add($"PrimaryApiKey is required when API authentication mode is ApiKey. Specify Dashboard:Api:PrimaryApiKey or Dashboard:Mcp:PrimaryApiKey.");
+                errorMessages.Add($"PrimaryApiKey is required when API authentication mode is ApiKey. Specify Dashboard:Api:PrimaryApiKey.");
             }
         }
 

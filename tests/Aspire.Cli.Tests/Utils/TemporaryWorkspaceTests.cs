@@ -1,0 +1,80 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
+namespace Aspire.Cli.Tests.Utils;
+
+public class TemporaryWorkspaceTests(ITestOutputHelper outputHelper)
+{
+    [Fact]
+    public void Create_PreservesWorkspaceWhenFailureCaptureRequested()
+    {
+        const string preserveWorkspaceOnFailureKey = "PreserveWorkspaceOnFailure";
+        var keyValueStorage = TestContext.Current.KeyValueStorage;
+        keyValueStorage[preserveWorkspaceOnFailureKey] = true;
+        var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var workspacePath = workspace.WorkspaceRoot.FullName;
+
+        try
+        {
+            workspace.Dispose();
+
+            Assert.True(Directory.Exists(workspacePath));
+
+            TemporaryWorkspace.ReleasePreservation(workspacePath);
+
+            Assert.False(Directory.Exists(workspacePath));
+        }
+        finally
+        {
+            keyValueStorage.TryRemove(preserveWorkspaceOnFailureKey, out _);
+            TemporaryWorkspace.ReleasePreservation(workspacePath);
+        }
+
+        var disposableWorkspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var disposableWorkspacePath = disposableWorkspace.WorkspaceRoot.FullName;
+
+        disposableWorkspace.Dispose();
+
+        Assert.False(Directory.Exists(disposableWorkspacePath));
+    }
+
+    [Fact]
+    public void ReleasePreservation_DeletesPreservedWorkspaceWhenRequested()
+    {
+        var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var workspacePath = workspace.WorkspaceRoot.FullName;
+
+        workspace.Preserve();
+        workspace.Dispose();
+
+        Assert.True(Directory.Exists(workspacePath));
+
+        TemporaryWorkspace.ReleasePreservation(workspacePath);
+
+        Assert.False(Directory.Exists(workspacePath));
+    }
+
+    [Fact]
+    public void ReleasePreservation_LeavesPreservedWorkspaceWhenDeletionDisabled()
+    {
+        var workspace = TemporaryWorkspace.CreateForCli(outputHelper);
+        var workspacePath = workspace.WorkspaceRoot.FullName;
+
+        workspace.Preserve();
+        workspace.Dispose();
+
+        try
+        {
+            TemporaryWorkspace.ReleasePreservation(workspacePath, deleteDirectory: false);
+
+            Assert.True(Directory.Exists(workspacePath));
+        }
+        finally
+        {
+            if (Directory.Exists(workspacePath))
+            {
+                Directory.Delete(workspacePath, recursive: true);
+            }
+        }
+    }
+}

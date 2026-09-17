@@ -22,7 +22,7 @@ public class CliHostEnvironmentTests
     }
 
     [Fact]
-    public void SupportsInteractiveOutput_ReturnsTrue_WhenNoConfigSet()
+    public void SupportsInteractiveOutput_DependsOnConsoleHandles_WhenNoConfigSet()
     {
         // Arrange
         var configuration = new ConfigurationBuilder().Build();
@@ -30,7 +30,45 @@ public class CliHostEnvironmentTests
         // Act
         var env = new CliHostEnvironment(configuration, nonInteractive: false);
 
-        // Assert
+        // Assert — result depends on whether the test host has valid console handles
+        // (true in a real terminal, false in redirected/CI environments).
+        // The important contract: it should NOT throw.
+        _ = env.SupportsInteractiveOutput;
+    }
+
+    [Fact]
+    public void SupportsInteractiveOutput_ReturnsFalse_WhenOutputIsRedirected()
+    {
+        var configuration = new ConfigurationBuilder().Build();
+
+        var env = new CliHostEnvironment(configuration, nonInteractive: false, isOutputRedirected: true);
+
+        Assert.False(env.SupportsInteractiveOutput);
+    }
+
+    [Fact]
+    public void SupportsInteractiveOutput_ReturnsFalse_WhenOutputIsRedirectedInPlaygroundMode()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ASPIRE_PLAYGROUND"] = "true"
+            })
+            .Build();
+
+        var env = new CliHostEnvironment(configuration, nonInteractive: false, isOutputRedirected: true);
+
+        Assert.False(env.SupportsInteractiveOutput);
+    }
+
+    [PlatformSpecific(TestPlatforms.AnyUnix)]
+    [Fact]
+    public void SupportsInteractiveOutput_ReturnsTrue_WhenOutputIsNotRedirected()
+    {
+        var configuration = new ConfigurationBuilder().Build();
+
+        var env = new CliHostEnvironment(configuration, nonInteractive: false, isOutputRedirected: false);
+
         Assert.True(env.SupportsInteractiveOutput);
     }
 
@@ -95,6 +133,23 @@ public class CliHostEnvironmentTests
 
         // Assert
         Assert.False(env.SupportsInteractiveInput);
+    }
+
+    [Fact]
+    public void SupportsInteractiveInput_ReturnsTrue_WhenExtensionPromptsEnabledInCI()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ASPIRE_EXTENSION_ENDPOINT"] = "localhost:1234",
+                ["ASPIRE_EXTENSION_PROMPT_ENABLED"] = "true",
+                ["GITHUB_ACTIONS"] = "true"
+            })
+            .Build();
+
+        var env = new CliHostEnvironment(configuration, nonInteractive: false);
+
+        Assert.True(env.SupportsInteractiveInput);
     }
 
     [Theory]
@@ -164,6 +219,24 @@ public class CliHostEnvironmentTests
     }
 
     [Fact]
+    public void SupportsAnsi_RespectsAnsiConfiguration_WhenNonInteractiveTrue()
+    {
+        // Arrange - --non-interactive should not suppress ANSI when it is explicitly enabled.
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ASPIRE_ANSI_PASS_THRU"] = "true"
+            })
+            .Build();
+
+        // Act
+        var env = new CliHostEnvironment(configuration, nonInteractive: true);
+
+        // Assert
+        Assert.True(env.SupportsAnsi);
+    }
+
+    [Fact]
     public void SupportsInteractiveInput_ReturnsTrue_WhenPlaygroundModeSet()
     {
         // Arrange
@@ -193,7 +266,7 @@ public class CliHostEnvironmentTests
             .Build();
 
         // Act
-        var env = new CliHostEnvironment(configuration, nonInteractive: false);
+        var env = new CliHostEnvironment(configuration, nonInteractive: false, isOutputRedirected: false);
 
         // Assert
         Assert.True(env.SupportsInteractiveOutput);
@@ -231,7 +304,7 @@ public class CliHostEnvironmentTests
             .Build();
 
         // Act
-        var env = new CliHostEnvironment(configuration, nonInteractive: false);
+        var env = new CliHostEnvironment(configuration, nonInteractive: false, isOutputRedirected: false);
 
         // Assert
         Assert.True(env.SupportsInteractiveOutput);
@@ -326,24 +399,6 @@ public class CliHostEnvironmentTests
 
         // Act
         var env = new CliHostEnvironment(configuration, nonInteractive: false);
-
-        // Assert
-        Assert.True(env.SupportsAnsi);
-    }
-
-    [Fact]
-    public void SupportsAnsi_ReturnsTrue_WhenAnsiPassThruSet_WithNonInteractive()
-    {
-        // Arrange - ASPIRE_ANSI_PASS_THRU explicitly enables ANSI even with --non-interactive
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ASPIRE_ANSI_PASS_THRU"] = "true"
-            })
-            .Build();
-
-        // Act
-        var env = new CliHostEnvironment(configuration, nonInteractive: true);
 
         // Assert
         Assert.True(env.SupportsAnsi);

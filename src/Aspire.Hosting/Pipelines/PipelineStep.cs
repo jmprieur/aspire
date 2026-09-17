@@ -14,8 +14,11 @@ namespace Aspire.Hosting.Pipelines;
 /// </summary>
 [Experimental("ASPIREPIPELINES001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
 [DebuggerDisplay("{DebuggerToString(),nq}")]
+[AspireExport(ExposeProperties = true)]
 public class PipelineStep
 {
+    private readonly List<Func<PipelineStepContext, Task>> _finalActions = [];
+
     /// <summary>
     /// Gets or initializes the unique name of the step.
     /// </summary>
@@ -34,6 +37,8 @@ public class PipelineStep
     /// Gets or initializes the action to execute for this step.
     /// </summary>
     public required Func<PipelineStepContext, Task> Action { get; init; }
+
+    internal IReadOnlyList<Func<PipelineStepContext, Task>> FinalActions => _finalActions;
 
     /// <summary>
     /// Gets or initializes the list of step names that this step depends on.
@@ -54,12 +59,14 @@ public class PipelineStep
     /// <summary>
     /// Gets or initializes the resource that this step is associated with, if any.
     /// </summary>
+    [AspireExportIgnore(Reason = "The associated resource is an internal runtime link and may be null for steps that are not tied to a resource.")]
     public IResource? Resource { get; set; }
 
     /// <summary>
     /// Adds a dependency on another step.
     /// </summary>
     /// <param name="stepName">The name of the step to depend on.</param>
+    [AspireExport]
     public void DependsOn(string stepName)
     {
         DependsOnSteps.Add(stepName);
@@ -79,9 +86,21 @@ public class PipelineStep
     /// This creates the inverse relationship where the other step will depend on this step.
     /// </summary>
     /// <param name="stepName">The name of the step that requires this step.</param>
+    [AspireExport]
     public void RequiredBy(string stepName)
     {
         RequiredBySteps.Add(stepName);
+    }
+
+    /// <summary>
+    /// Adds a tag to the step.
+    /// </summary>
+    /// <param name="tag">The tag to add.</param>
+    [AspireExport]
+    internal void AddTag(string tag)
+    {
+        ArgumentNullException.ThrowIfNull(tag);
+        Tags.Add(tag);
     }
 
     /// <summary>
@@ -92,6 +111,34 @@ public class PipelineStep
     public void RequiredBy(PipelineStep step)
     {
         RequiredBySteps.Add(step.Name);
+    }
+
+    /// <summary>
+    /// Creates a shallow clone of this step with fresh copies of its
+    /// <see cref="DependsOnSteps"/>, <see cref="RequiredBySteps"/>, <see cref="Tags"/>,
+    /// and final action lists. Used by <see cref="DistributedApplicationPipeline"/> when
+    /// isolating step-graph mutations during a phase such as BeforeStart.
+    /// </summary>
+    internal PipelineStep Clone()
+    {
+        var clone = new PipelineStep
+        {
+            Name = Name,
+            Description = Description,
+            Action = Action,
+            DependsOnSteps = [.. DependsOnSteps],
+            RequiredBySteps = [.. RequiredBySteps],
+            Tags = [.. Tags],
+            Resource = Resource,
+        };
+        clone._finalActions.AddRange(_finalActions);
+        return clone;
+    }
+
+    internal void AddFinalAction(Func<PipelineStepContext, Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        _finalActions.Add(action);
     }
 
     private string DebuggerToString()

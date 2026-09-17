@@ -10,15 +10,19 @@ namespace Aspire.Hosting
 {
     public static partial class AzureBicepResourceExtensions
     {
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<Azure.AzureBicepResource> AddBicepTemplate(this IDistributedApplicationBuilder builder, string name, string bicepFile) { throw null; }
 
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<Azure.AzureBicepResource> AddBicepTemplateString(this IDistributedApplicationBuilder builder, string name, string bicepContent) { throw null; }
 
+        [AspireExport]
         public static Azure.BicepOutputReference GetOutput(this ApplicationModel.IResourceBuilder<Azure.AzureBicepResource> builder, string name) { throw null; }
 
         [System.Obsolete("GetSecretOutput is obsolete. Use IAzureKeyVaultResource.GetSecret instead.")]
         public static Azure.BicepSecretOutputReference GetSecretOutput(this ApplicationModel.IResourceBuilder<Azure.AzureBicepResource> builder, string name) { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withEnvironment dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithEnvironment<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, Azure.BicepOutputReference bicepOutputReference)
             where T : ApplicationModel.IResourceWithEnvironment { throw null; }
 
@@ -26,104 +30,209 @@ namespace Aspire.Hosting
         public static ApplicationModel.IResourceBuilder<T> WithEnvironment<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, Azure.BicepSecretOutputReference bicepOutputReference)
             where T : ApplicationModel.IResourceWithEnvironment { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withEnvironment dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithEnvironment<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, Azure.IAzureKeyVaultSecretReference secretReference)
             where T : ApplicationModel.IResourceWithEnvironment { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, ApplicationModel.EndpointReference value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, ApplicationModel.IResourceBuilder<ApplicationModel.IResourceWithConnectionString> value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Raw ParameterResource overload; use the IResourceBuilder<ParameterResource> overload instead.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, ApplicationModel.ParameterResource value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, ApplicationModel.ReferenceExpression value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, Azure.BicepOutputReference value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, System.Collections.Generic.IEnumerable<string> value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Func<object?> callbacks are not ATS-compatible.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, System.Func<object?> valueCallback)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "JsonNode values are not ATS-compatible.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, System.Text.Json.Nodes.JsonNode value)
             where T : Azure.AzureBicepResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Polyglot app hosts use the internal withParameter dispatcher export.")]
         public static ApplicationModel.IResourceBuilder<T> WithParameter<T>(this ApplicationModel.IResourceBuilder<T> builder, string name)
             where T : Azure.AzureBicepResource { throw null; }
     }
 
     public static partial class AzureProvisionerExtensions
     {
+        [AspireExport]
         public static IDistributedApplicationBuilder AddAzureProvisioning(this IDistributedApplicationBuilder builder) { throw null; }
     }
 
     public static partial class AzureProvisioningResourceExtensions
     {
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<Azure.AzureProvisioningResource> AddAzureInfrastructure(this IDistributedApplicationBuilder builder, string name, System.Action<Azure.AzureResourceInfrastructure> configureInfrastructure) { throw null; }
 
+        [AspireExportIgnore(Reason = "KeyVaultSecret is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.KeyVault.KeyVaultSecret AsKeyVaultSecret(this Azure.IAzureKeyVaultSecretReference secretReference, Azure.AzureResourceInfrastructure infrastructure) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this ApplicationModel.EndpointReference endpointReference, Azure.AzureResourceInfrastructure infrastructure, string parameterName) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this ApplicationModel.IManifestExpressionProvider manifestExpressionProvider, Azure.AzureResourceInfrastructure infrastructure, string? parameterName = null, bool? isSecure = null) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> parameterResourceBuilder, Azure.AzureResourceInfrastructure infrastructure, string? parameterName = null) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this ApplicationModel.ParameterResource parameterResource, Azure.AzureResourceInfrastructure infrastructure, string? parameterName = null) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this ApplicationModel.ReferenceExpression expression, Azure.AzureResourceInfrastructure infrastructure, string parameterName) { throw null; }
 
+        [AspireExportIgnore(Reason = "ProvisioningParameter is an Azure.Provisioning type not compatible with ATS.")]
         public static global::Azure.Provisioning.ProvisioningParameter AsProvisioningParameter(this Azure.BicepOutputReference outputReference, Azure.AzureResourceInfrastructure infrastructure, string? parameterName = null) { throw null; }
 
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<T> ConfigureInfrastructure<T>(this ApplicationModel.IResourceBuilder<T> builder, System.Action<Azure.AzureResourceInfrastructure> configure)
             where T : Azure.AzureProvisioningResource { throw null; }
     }
 
     public static partial class AzureResourceExtensions
     {
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<T> ClearDefaultRoleAssignments<T>(this ApplicationModel.IResourceBuilder<T> builder)
             where T : ApplicationModel.IAzureResource { throw null; }
 
+        [AspireExport]
         public static string GetBicepIdentifier(this ApplicationModel.IAzureResource resource) { throw null; }
 
+        [System.Obsolete("PublishAsConnectionString only works with the manifest publisher and is obsolete. Use AddConnectionString in publish-mode app model code instead.")]
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<T> PublishAsConnectionString<T>(this ApplicationModel.IResourceBuilder<T> builder)
             where T : ApplicationModel.IAzureResource, ApplicationModel.IResourceWithConnectionString { throw null; }
     }
 
     public static partial class ExistingAzureResourceExtensions
     {
+        [AspireExportIgnore(Reason = "Use the polyglot asExisting overload that accepts string or ParameterResource values instead.")]
         public static ApplicationModel.IResourceBuilder<T> AsExisting<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? resourceGroupParameter)
             where T : ApplicationModel.IAzureResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> resourceGroupParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string resourceGroup, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot asExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> AsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, string name)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the Azure resource-specific polyglot export instead.")]
         public static bool IsExisting(this ApplicationModel.IResource resource) { throw null; }
 
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExisting overload that accepts string or ParameterResource values instead.")]
         public static ApplicationModel.IResourceBuilder<T> PublishAsExisting<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? resourceGroupParameter)
             where T : ApplicationModel.IAzureResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExisting overload that accepts string or ParameterResource values instead.")]
         public static ApplicationModel.IResourceBuilder<T> PublishAsExisting<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string? resourceGroup)
             where T : ApplicationModel.IAzureResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> resourceGroupParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string resourceGroup, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot publishAsExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> PublishAsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, string name)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExisting overload that accepts string or ParameterResource values instead.")]
         public static ApplicationModel.IResourceBuilder<T> RunAsExisting<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource>? resourceGroupParameter)
             where T : ApplicationModel.IAzureResource { throw null; }
 
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExisting overload that accepts string or ParameterResource values instead.")]
         public static ApplicationModel.IResourceBuilder<T> RunAsExisting<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string? resourceGroup)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> resourceGroupParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInResourceGroup overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInResourceGroup<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string resourceGroup, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> subscriptionParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInSubscription overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInSubscription<T>(this ApplicationModel.IResourceBuilder<T> builder, string name, string subscription)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> nameParameter)
+            where T : ApplicationModel.IAzureResource { throw null; }
+
+        [AspireExportIgnore(Reason = "Use the polyglot runAsExistingInTenant overload that accepts string or ParameterResource values instead.")]
+        public static ApplicationModel.IResourceBuilder<T> RunAsExistingInTenant<T>(this ApplicationModel.IResourceBuilder<T> builder, string name)
             where T : ApplicationModel.IAzureResource { throw null; }
     }
 }
 
 namespace Aspire.Hosting.ApplicationModel
 {
+    [AspireExport]
     public partial interface IAzureResource : IResource
     {
         System.Threading.Tasks.TaskCompletionSource? ProvisioningTaskCompletionSource { get; set; }
@@ -195,14 +304,23 @@ namespace Aspire.Hosting.Azure
 
         public AzureBicepResourceScope(object resourceGroup) { }
 
+        public bool HasResourceGroup { get { throw null; } }
+
+        public bool IsTenantScope { get { throw null; } }
+
         public object ResourceGroup { get { throw null; } }
 
         public object? Subscription { get { throw null; } }
+
+        public static AzureBicepResourceScope CreateForSubscription(object subscription) { throw null; }
+
+        public static AzureBicepResourceScope CreateForTenant() { throw null; }
     }
 
-    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE001", UrlFormat = "https://aka.ms/dotnet/aspire/diagnostics#{0}")]
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE001", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
     public sealed partial class AzureEnvironmentResource : ApplicationModel.Resource
     {
+        public const string PrepareResourcesStepName = "azure-prepare-resources";
         public const string ProvisionInfrastructureStepName = "provision-azure-bicep-resources";
         public AzureEnvironmentResource(string name, ApplicationModel.ParameterResource location, ApplicationModel.ParameterResource resourceGroupName, ApplicationModel.ParameterResource principalId) : base(default!) { }
 
@@ -215,12 +333,15 @@ namespace Aspire.Hosting.Azure
 
     public static partial class AzureEnvironmentResourceExtensions
     {
+        [AspireExport]
         [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
         public static ApplicationModel.IResourceBuilder<AzureEnvironmentResource> AddAzureEnvironment(this IDistributedApplicationBuilder builder) { throw null; }
 
+        [AspireExport]
         [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
         public static ApplicationModel.IResourceBuilder<AzureEnvironmentResource> WithLocation(this ApplicationModel.IResourceBuilder<AzureEnvironmentResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> location) { throw null; }
 
+        [AspireExport]
         [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
         public static ApplicationModel.IResourceBuilder<AzureEnvironmentResource> WithResourceGroup(this ApplicationModel.IResourceBuilder<AzureEnvironmentResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.ParameterResource> resourceGroup) { throw null; }
     }
@@ -272,6 +393,7 @@ namespace Aspire.Hosting.Azure
         public System.Threading.Tasks.Task WriteModelAsync(ApplicationModel.DistributedApplicationModel model, AzureEnvironmentResource environment, System.Threading.CancellationToken cancellationToken = default) { throw null; }
     }
 
+    [AspireExport(ExposeProperties = true)]
     public sealed partial class AzureResourceInfrastructure : global::Azure.Provisioning.Infrastructure
     {
         internal AzureResourceInfrastructure() : base(default!) { }
@@ -279,10 +401,36 @@ namespace Aspire.Hosting.Azure
         public AzureProvisioningResource AspireResource { get { throw null; } }
     }
 
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    public sealed partial class AzureRoleAssignmentResource : AzureProvisioningResource
+    {
+        public AzureRoleAssignmentResource(string name, AzureProvisioningResource targetAzureResource, ApplicationModel.IResource? ownerResource, AzureUserAssignedIdentityResource? identityResource, System.Action<AzureResourceInfrastructure> configureInfrastructure) : base(default!, default!) { }
+
+        public AzureUserAssignedIdentityResource? IdentityResource { get { throw null; } }
+
+        public ApplicationModel.IResource? OwnerResource { get { throw null; } }
+
+        public AzureProvisioningResource TargetAzureResource { get { throw null; } }
+    }
+
+    public static partial class AzureSubnetServiceDelegations
+    {
+        [AspireValue("AzureSubnetServiceDelegations")]
+        public const string ApplicationGatewayForContainers = "Microsoft.ServiceNetworking/trafficControllers";
+        [AspireValue("AzureSubnetServiceDelegations")]
+        public const string AppServiceEnvironments = "Microsoft.Web/serverFarms";
+        [AspireValue("AzureSubnetServiceDelegations")]
+        public const string ContainerAppEnvironments = "Microsoft.App/environments";
+        [AspireValue("AzureSubnetServiceDelegations")]
+        public const string ContainerInstances = "Microsoft.ContainerInstance/containerGroups";
+    }
+
     public static partial class AzureUserAssignedIdentityExtensions
     {
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<AzureUserAssignedIdentityResource> AddAzureUserAssignedIdentity(this IDistributedApplicationBuilder builder, string name) { throw null; }
 
+        [AspireExport("withUserAssignedIdentityAzureUserAssignedIdentity", MethodName = "withAzureUserAssignedIdentity")]
         public static ApplicationModel.IResourceBuilder<T> WithAzureUserAssignedIdentity<T>(this ApplicationModel.IResourceBuilder<T> builder, ApplicationModel.IResourceBuilder<AzureUserAssignedIdentityResource> identityResourceBuilder)
             where T : ApplicationModel.IComputeResource { throw null; }
     }
@@ -304,7 +452,8 @@ namespace Aspire.Hosting.Azure
         public override global::Azure.Provisioning.Primitives.ProvisionableResource AddAsExistingResource(AzureResourceInfrastructure infra) { throw null; }
     }
 
-    public sealed partial class BicepOutputReference : ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueProvider, ApplicationModel.IValueWithReferences, System.IEquatable<BicepOutputReference>
+    [AspireExport(ExposeProperties = true)]
+    public sealed partial class BicepOutputReference : ApplicationModel.IExpressionValue, ApplicationModel.IValueProvider, ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueWithReferences, System.IEquatable<BicepOutputReference>
     {
         public BicepOutputReference(string name, AzureBicepResource resource) { }
 
@@ -326,7 +475,7 @@ namespace Aspire.Hosting.Azure
     }
 
     [System.Obsolete("BicepSecretOutputReference is no longer supported. Use IAzureKeyVaultResource instead.")]
-    public sealed partial class BicepSecretOutputReference : ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueProvider, ApplicationModel.IValueWithReferences
+    public sealed partial class BicepSecretOutputReference : ApplicationModel.IExpressionValue, ApplicationModel.IValueProvider, ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueWithReferences
     {
         public BicepSecretOutputReference(string name, AzureBicepResource resource) { }
 
@@ -361,13 +510,34 @@ namespace Aspire.Hosting.Azure
         public System.Collections.Generic.IReadOnlySet<RoleDefinition> Roles { get { throw null; } }
     }
 
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
+    public sealed partial class DelegatedSubnetAnnotation : ApplicationModel.IResourceAnnotation
+    {
+        public DelegatedSubnetAnnotation(ApplicationModel.ReferenceExpression subnetId) { }
+
+        public ApplicationModel.ReferenceExpression SubnetId { get { throw null; } }
+    }
+
+    public sealed partial class DeploymentPrerequisitesAnnotation : ApplicationModel.IResourceAnnotation
+    {
+        public DeploymentPrerequisitesAnnotation(System.Collections.Generic.IReadOnlySet<AzureBicepResource> resources) { }
+
+        public System.Collections.Generic.IReadOnlySet<AzureBicepResource> Resources { get { throw null; } }
+    }
+
     public sealed partial class ExistingAzureResourceAnnotation : ApplicationModel.IResourceAnnotation
     {
+        public ExistingAzureResourceAnnotation(object name, object? resourceGroup, object subscription) { }
+
         public ExistingAzureResourceAnnotation(object name, object? resourceGroup = null) { }
+
+        public bool IsTenantScope { get { throw null; } }
 
         public object Name { get { throw null; } }
 
         public object? ResourceGroup { get { throw null; } }
+
+        public object? Subscription { get { throw null; } }
     }
 
     public partial interface IAddRoleAssignmentsContext
@@ -398,13 +568,26 @@ namespace Aspire.Hosting.Azure
 
     public partial interface IAzureComputeEnvironmentResource : ApplicationModel.IComputeEnvironmentResource, ApplicationModel.IResource
     {
+        IAzureContainerRegistryResource? ContainerRegistry { get; }
     }
 
+    [System.Obsolete("Use IAzureContainerRegistryResource instead and access container registry through IAzureComputeEnvironmentResource.ContainerRegistry property.")]
     public partial interface IAzureContainerRegistry : ApplicationModel.IContainerRegistry
     {
         ApplicationModel.ReferenceExpression ManagedIdentityId { get; }
     }
 
+    public partial interface IAzureContainerRegistryResource : ApplicationModel.IContainerRegistry, ApplicationModel.IAzureResource, ApplicationModel.IResource
+    {
+    }
+
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
+    public partial interface IAzureDelegatedSubnetResource : ApplicationModel.IResource
+    {
+        string DelegatedSubnetServiceName { get; }
+    }
+
+    [AspireExport]
     public partial interface IAzureKeyVaultResource : ApplicationModel.IResource, ApplicationModel.IAzureResource
     {
         BicepOutputReference NameOutputReference { get; }
@@ -416,7 +599,8 @@ namespace Aspire.Hosting.Azure
         IAzureKeyVaultSecretReference GetSecret(string secretName);
     }
 
-    public partial interface IAzureKeyVaultSecretReference : ApplicationModel.IValueProvider, ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueWithReferences
+    [AspireExport]
+    public partial interface IAzureKeyVaultSecretReference : ApplicationModel.IExpressionValue, ApplicationModel.IValueProvider, ApplicationModel.IManifestExpressionProvider, ApplicationModel.IValueWithReferences
     {
         System.Collections.Generic.IEnumerable<object> ApplicationModel.IValueWithReferences.References { get; }
 
@@ -427,9 +611,47 @@ namespace Aspire.Hosting.Azure
         ApplicationModel.IResource? SecretOwner { get; set; }
     }
 
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
+    public partial interface IAzureNspAssociationTarget : ApplicationModel.IResource
+    {
+        BicepOutputReference Id { get; }
+    }
+
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
+    public partial interface IAzurePrivateEndpointTarget : ApplicationModel.IResource
+    {
+        BicepOutputReference Id { get; }
+
+        System.Collections.Generic.IEnumerable<string> GetPrivateDnsZoneNames();
+        System.Collections.Generic.IEnumerable<string> GetPrivateLinkGroupIds();
+    }
+
     public partial interface IResourceWithAzureFunctionsConfig : ApplicationModel.IResource
     {
         void ApplyAzureFunctionsConfiguration(System.Collections.Generic.IDictionary<string, object> target, string connectionName);
+    }
+
+    public partial interface ITokenCredentialProvider
+    {
+        global::Azure.Core.TokenCredential TokenCredential { get; }
+    }
+
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics#{0}")]
+    public sealed partial class PrivateEndpointTargetAnnotation : ApplicationModel.IResourceAnnotation
+    {
+        public PrivateEndpointTargetAnnotation(AzureProvisioningResource privateEndpointResource) { }
+
+        public AzureProvisioningResource PrivateEndpointResource { get { throw null; } }
+    }
+
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREAZURE003", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    public sealed partial class ReferenceRoleAssignmentAnnotation : ApplicationModel.IResourceAnnotation
+    {
+        public ReferenceRoleAssignmentAnnotation(AzureProvisioningResource target, System.Collections.Generic.IReadOnlySet<RoleDefinition> roles) { }
+
+        public System.Collections.Generic.IReadOnlySet<RoleDefinition> Roles { get { throw null; } }
+
+        public AzureProvisioningResource Target { get { throw null; } }
     }
 
     public partial class RoleAssignmentAnnotation : ApplicationModel.IResourceAnnotation

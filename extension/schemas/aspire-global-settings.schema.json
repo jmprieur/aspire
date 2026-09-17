@@ -29,22 +29,6 @@
           "description": "Enable or disable watch mode by default when running Aspire applications for automatic restarts on file changes",
           "default": false
         },
-        "execCommandEnabled": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "true",
-                "false"
-              ]
-            }
-          ],
-          "description": "Enable or disable the 'aspire exec' command for executing commands inside running resources",
-          "default": false
-        },
         "experimentalPolyglot:go": {
           "anyOf": [
             {
@@ -109,7 +93,7 @@
           "description": "Enable or disable experimental Rust language support for polyglot Aspire applications",
           "default": false
         },
-        "minimumSdkCheckEnabled": {
+        "nugetSignatureVerificationEnabled": {
           "anyOf": [
             {
               "type": "boolean"
@@ -122,10 +106,10 @@
               ]
             }
           ],
-          "description": "Enable or disable minimum .NET SDK version checking before running Aspire applications",
+          "description": "Enable or disable defaulting the DOTNET_NUGET_SIGNATURE_VERIFICATION environment variable for spawned processes",
           "default": true
         },
-        "orphanDetectionWithTimestampEnabled": {
+        "polyglotIntegrationFilterEnabled": {
           "anyOf": [
             {
               "type": "boolean"
@@ -138,40 +122,8 @@
               ]
             }
           ],
-          "description": "Enable or disable timestamp-based orphan process detection to clean up stale Aspire processes",
-          "default": true
-        },
-        "packageSearchDiskCachingEnabled": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "true",
-                "false"
-              ]
-            }
-          ],
-          "description": "Enable or disable disk caching for package search results to improve performance",
-          "default": true
-        },
-        "runningInstanceDetectionEnabled": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "string",
-              "enum": [
-                "true",
-                "false"
-              ]
-            }
-          ],
-          "description": "Enable or disable detection of already running Aspire instances to prevent conflicts",
-          "default": true
+          "description": "(Experimental) Restrict 'aspire add', 'aspire integration list', and 'aspire integration search' in non-C# AppHosts to integrations carrying the 'polyglot' NuGet tag. Disabled by default because no remote feed resolves the tag usefully today: Azure DevOps Artifacts feeds ignore 'tags:' query scoping, and nuget.org returns no first-party integrations for it. The filter fails closed, so enabling it against a remote feed hides every integration. Enable it only against a local package source or hive, where the tag is read from the nuspec.",
+          "default": false
         },
         "showAllTemplates": {
           "anyOf": [
@@ -221,6 +173,22 @@
           "description": "Enable or disable access to the staging channel for early access to preview features and packages",
           "default": false
         },
+        "terminalCommandsEnabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          ],
+          "description": "(Experimental) Enable the 'aspire terminal' command group ('aspire terminal ps', 'aspire terminal attach'). Used in conjunction with the experimental WithTerminal() API (ASPIRETERMINAL001). Hidden by default while the API surface is in preview.",
+          "default": false
+        },
         "updateNotificationsEnabled": {
           "anyOf": [
             {
@@ -245,16 +213,19 @@
       "type": "string"
     },
     "packages": {
-      "description": "Package name to version mapping",
+      "description": "Package references as an object literal (like npm's package.json). Key is package name, value is version.",
       "type": "object",
       "additionalProperties": {
-        "type": "string",
-        "description": "Package version"
+        "type": "string"
       }
     },
     "sdkVersion": {
       "description": "The Aspire SDK version used for this polyglot AppHost project. Determines the version of Aspire.Hosting packages to use.",
       "type": "string"
+    },
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference"
     }
   },
   "additionalProperties": false

@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIREPIPELINES002
+#pragma warning disable ASPIRECOMPUTE002 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Kubernetes.Extensions;
@@ -18,6 +19,7 @@ internal sealed class KubernetesPublishingContext(
     DistributedApplicationExecutionContext executionContext,
     string outputPath,
     ILogger logger,
+    KubernetesEnvironmentResource? environment = null,
     CancellationToken cancellationToken = default)
 {
     public readonly string OutputPath = outputPath;
@@ -33,6 +35,7 @@ internal sealed class KubernetesPublishingContext(
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .WithTypeConverter(new ByteArrayStringYamlConverter())
         .WithTypeConverter(new IntOrStringYamlConverter())
+        .WithTypeConverter(new KubernetesManifestResourceYamlConverter())
         .WithEventEmitter(nextEmitter => new ForceQuotedStringsEventEmitter(nextEmitter, HelmExtensions.ShouldDoubleQuoteString))
         .WithEventEmitter(e => new FloatEmitter(e))
         .WithEmissionPhaseObjectGraphVisitor(args => new YamlIEnumerableSkipEmptyObjectGraphVisitor(args.InnerVisitor))
@@ -66,9 +69,17 @@ internal sealed class KubernetesPublishingContext(
 
     private async Task WriteKubernetesOutputAsync(DistributedApplicationModel model, KubernetesEnvironmentResource environment)
     {
-        foreach (var resource in model.Resources)
+        // Include the dashboard resource alongside model resources so its templates are generated.
+        // This mirrors the Docker Compose pattern in DockerComposePublishingContext.
+        IEnumerable<IResource> resources = environment.DashboardEnabled && environment.Dashboard?.Resource is IResource dashboardResource
+            ? [dashboardResource, .. model.Resources]
+            : model.Resources;
+
+        foreach (var resource in resources)
         {
-            if (resource.GetDeploymentTargetAnnotation(environment)?.DeploymentTarget is KubernetesResource serviceResource)
+            // Check for deployment target matching this environment or its parent (e.g., AKS)
+            var targetEnv = (IComputeEnvironmentResource?)environment.OwningComputeEnvironment ?? environment;
+            if (resource.GetDeploymentTargetAnnotation(targetEnv)?.DeploymentTarget is KubernetesResource serviceResource)
             {
                 // Materialize Dockerfile factory if present
                 if (serviceResource.TargetResource.TryGetLastAnnotation<DockerfileBuildAnnotation>(out var dockerfileBuildAnnotation) &&
@@ -76,16 +87,14 @@ internal sealed class KubernetesPublishingContext(
                 {
                     var dockerfileContext = new DockerfileFactoryContext
                     {
-                        Services = executionContext.ServiceProvider,
+                        Services = executionContext.Services,
                         Resource = serviceResource.TargetResource,
                         CancellationToken = cancellationToken
                     };
-                    await dockerfileBuildAnnotation.MaterializeDockerfileAsync(dockerfileContext, cancellationToken).ConfigureAwait(false);
 
                     // Copy to a resource-specific path in the output folder for publishing
                     var resourceDockerfilePath = Path.Combine(OutputPath, $"{serviceResource.TargetResource.Name}.Dockerfile");
-                    Directory.CreateDirectory(OutputPath);
-                    File.Copy(dockerfileBuildAnnotation.DockerfilePath, resourceDockerfilePath, overwrite: true);
+                    await dockerfileBuildAnnotation.EmitDockerfileArtifactsAsync(dockerfileContext, resourceDockerfilePath).ConfigureAwait(false);
                 }
 
                 if (serviceResource.TargetResource.TryGetAnnotationsOfType<KubernetesServiceCustomizationAnnotation>(out var annotations))
@@ -96,20 +105,151 @@ internal sealed class KubernetesPublishingContext(
                     }
                 }
 
+                // Apply node pool nodeSelector if the resource has a node pool annotation
+                if (serviceResource.TargetResource.TryGetLastAnnotation<KubernetesNodePoolAnnotation>(out var nodePoolAnnotation))
+                {
+                    ApplyNodePoolSelector(serviceResource, nodePoolAnnotation.NodePool);
+                }
+
                 await WriteKubernetesTemplatesForResource(resource, serviceResource.GetTemplatedResources()).ConfigureAwait(false);
                 await AppendResourceContextToHelmValuesAsync(resource, serviceResource).ConfigureAwait(false);
             }
         }
 
+        // Write Ingress resources as standalone templates.
+        foreach (var ingressResource in resources.OfType<KubernetesIngressResource>())
+        {
+            if (ingressResource.Parent == environment && ingressResource.GeneratedIngress is { } generatedIngress)
+            {
+                await WriteKubernetesTemplatesForResource(ingressResource, [generatedIngress]).ConfigureAwait(false);
+            }
+        }
+
+        // Write Gateway API resources (Gateway + HTTPRoutes) as standalone templates.
+        foreach (var gatewayResource in resources.OfType<KubernetesGatewayResource>())
+        {
+            if (gatewayResource.Parent == environment && gatewayResource.GeneratedGateway is { } generatedGateway)
+            {
+                var gatewayObjects = new List<BaseKubernetesResource> { generatedGateway };
+                gatewayObjects.AddRange(gatewayResource.GeneratedHttpRoutes);
+                await WriteKubernetesTemplatesForResource(gatewayResource, gatewayObjects).ConfigureAwait(false);
+            }
+        }
+
+        // Write first-class persistent volume resources as standalone PVC templates.
+        foreach (var volumeResource in resources.OfType<KubernetesPersistentVolumeResource>())
+        {
+            if (volumeResource.Parent == environment && volumeResource.GeneratedClaim is { } generatedClaim)
+            {
+                await WriteKubernetesTemplatesForResource(volumeResource, [generatedClaim]).ConfigureAwait(false);
+            }
+        }
+
         await WriteKubernetesHelmChartAsync(environment).ConfigureAwait(false);
+
+        // Drain any captured Helm values from ingress/gateway resources that don't go through
+        // AppendResourceContextToHelmValuesAsync (compute resources do). Without this, values.yaml
+        // would be missing placeholders for parameters referenced by WithIngressClass(parameter),
+        // WithHostname(parameter), WithTls(parameter), WithGatewayClass(parameter), etc., and
+        // `helm template` would render `<no value>` for those Helm references.
+        EnsureCapturedHelmValuePlaceholders(environment);
+
         await WriteKubernetesHelmValuesAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds empty placeholders to <see cref="_helmValues"/> for any captured Helm value
+    /// whose (section, resourceKey, valueKey) is not already present. Compute resources
+    /// populate their placeholders during <see cref="AppendResourceContextToHelmValuesAsync"/>;
+    /// ingress and gateway resources rely on this pass.
+    /// </summary>
+    private void EnsureCapturedHelmValuePlaceholders(KubernetesEnvironmentResource environment)
+    {
+        foreach (var captured in environment.CapturedHelmValues)
+        {
+            if (!_helmValues.TryGetValue(captured.Section, out var section))
+            {
+                continue;
+            }
+
+            if (!section.TryGetValue(captured.ResourceKey, out var resourceObj) ||
+                resourceObj is not Dictionary<string, object> resourceSection)
+            {
+                resourceSection = new Dictionary<string, object>();
+                section[captured.ResourceKey] = resourceSection;
+            }
+
+            resourceSection.TryAdd(captured.ValueKey, string.Empty);
+        }
     }
 
     private async Task AppendResourceContextToHelmValuesAsync(IResource resource, KubernetesResource resourceContext)
     {
-        await AddValuesToHelmSectionAsync(resource, resourceContext.Parameters, HelmExtensions.ParametersKey).ConfigureAwait(false);
-        await AddValuesToHelmSectionAsync(resource, resourceContext.EnvironmentVariables, HelmExtensions.ConfigKey).ConfigureAwait(false);
-        await AddValuesToHelmSectionAsync(resource, resourceContext.Secrets, HelmExtensions.SecretsKey).ConfigureAwait(false);
+        var parameterItems = MergeHelmValueMappings(
+            resource,
+            HelmExtensions.ParametersKey,
+            (resourceContext.Parameters, "condition parameter"));
+
+        // Embedded parameters need values.yaml entries for their Helm references, but they must
+        // not become additional environment variables in the generated ConfigMap or Secret.
+        var configItems = MergeHelmValueMappings(
+            resource,
+            HelmExtensions.ConfigKey,
+            (resourceContext.EnvironmentVariables, "environment value"),
+            (resourceContext.AdditionalConfigValues, "embedded parameter"));
+        var secretItems = MergeHelmValueMappings(
+            resource,
+            HelmExtensions.SecretsKey,
+            (resourceContext.Secrets, "environment value"),
+            (resourceContext.AdditionalSecretValues, "embedded parameter"));
+
+        await AddValuesToHelmSectionAsync(resource, parameterItems, HelmExtensions.ParametersKey).ConfigureAwait(false);
+        await AddValuesToHelmSectionAsync(resource, configItems, HelmExtensions.ConfigKey).ConfigureAwait(false);
+        await AddValuesToHelmSectionAsync(resource, secretItems, HelmExtensions.SecretsKey).ConfigureAwait(false);
+    }
+
+    private static Dictionary<string, KubernetesResource.HelmValue> MergeHelmValueMappings(
+        IResource resource,
+        string helmKey,
+        params (IReadOnlyDictionary<string, KubernetesResource.HelmValue> Values, string OriginKind)[] mappingGroups)
+    {
+        var resourceKey = resource.Name.ToHelmValuesSectionName();
+        var result = new Dictionary<string, KubernetesResource.HelmValue>(StringComparer.Ordinal);
+        var origins = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var (values, originKind) in mappingGroups)
+        {
+            foreach (var (key, value) in values)
+            {
+                var valuesKey = value.ValuesKey ?? key.ToHelmValuesSectionName();
+                var origin = $"{originKind} '{key}'";
+
+                if (!result.TryGetValue(valuesKey, out var existing))
+                {
+                    result.Add(valuesKey, value);
+                    origins.Add(valuesKey, origin);
+                    continue;
+                }
+
+                if (value.ParameterSource is not null &&
+                    ReferenceEquals(existing.ParameterSource, value.ParameterSource))
+                {
+                    if (value.IsEmbeddedParameter && !existing.IsEmbeddedParameter)
+                    {
+                        result[valuesKey] = value;
+                    }
+
+                    continue;
+                }
+
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' maps both {origins[valuesKey]} and {origin} " +
+                    $"to Helm values path '{helmKey}.{resourceKey}.{valuesKey}'. Rename one of them " +
+                    "so each value has a unique Helm path.");
+            }
+        }
+
+        return result;
     }
 
     private async Task AddValuesToHelmSectionAsync(
@@ -126,8 +266,24 @@ internal sealed class KubernetesPublishingContext(
 
         foreach (var (key, helmExpressionWithValue) in contextItems)
         {
+            // Use ValuesKey when available to ensure values.yaml key matches the Helm expression path.
+            // This matters when the dictionary key (env var name, e.g., "REDIS_PASSWORD") differs from
+            // the parameter name used in the Helm expression (e.g., "cache_password").
+            var valuesKey = helmExpressionWithValue.ValuesKey ?? key.ToHelmValuesSectionName();
+
+            // Cross-resource secret references have their Value set to a string containing
+            // Helm expressions (e.g., "cache:6379,password={{ .Values.secrets.cache.password }}").
+            // These need empty placeholders in values.yaml so the YAML section structure exists,
+            // and the actual values are resolved at deploy time from the captured cross-reference.
             if (helmExpressionWithValue.ValueContainsHelmExpression)
             {
+                paramValues[valuesKey] = string.Empty;
+                environment?.CapturedHelmCrossReferences.Add(
+                    new KubernetesEnvironmentResource.CapturedHelmCrossReference(
+                        helmKey,
+                        resource.Name.ToHelmValuesSectionName(),
+                        valuesKey,
+                        helmExpressionWithValue.ValueString!));
                 continue;
             }
 
@@ -136,14 +292,69 @@ internal sealed class KubernetesPublishingContext(
             // If there's a parameter source, resolve its value asynchronously
             if (helmExpressionWithValue.ParameterSource is ParameterResource parameter)
             {
-                value = await parameter.GetValueAsync(cancellationToken).ConfigureAwait(false);
+                if (parameter.Secret || parameter.Default is null)
+                {
+                    // Don't resolve secrets or parameters without defaults during publish.
+                    value = string.Empty;
+                }
+                else
+                {
+                    value = await parameter.GetValueAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                // Embedded parameters must participate in deploy-time lookup even when their
+                // published default is already present in values.yaml. Parent composite values
+                // are resolved from this lookup when writing the deploy override file.
+                if ((parameter.Secret || parameter.Default is null || helmExpressionWithValue.IsEmbeddedParameter) &&
+                    environment is not null &&
+                    !environment.CapturedHelmValues.Any(captured =>
+                        captured.Section == helmKey &&
+                        captured.ResourceKey == resource.Name.ToHelmValuesSectionName() &&
+                        captured.ValueKey == valuesKey))
+                {
+                    environment.CapturedHelmValues.Add(
+                        new KubernetesEnvironmentResource.CapturedHelmValue(
+                            helmKey,
+                            resource.Name.ToHelmValuesSectionName(),
+                            valuesKey,
+                            parameter));
+                }
             }
             else
             {
                 value = helmExpressionWithValue.Value;
+
+                // If the value has an IValueProvider source, capture it for deploy-time
+                // resolution. Write an empty placeholder now and resolve at deploy time.
+                // This handles Bicep output references, connection strings, and any other
+                // deferred value source without requiring Azure-specific knowledge.
+                if (helmExpressionWithValue.ValueProviderSource is { } valueProvider)
+                {
+                    value = string.Empty;
+                    environment?.CapturedHelmValueProviders.Add(
+                        new KubernetesEnvironmentResource.CapturedHelmValueProvider(
+                            helmKey,
+                            resource.Name.ToHelmValuesSectionName(),
+                            valuesKey,
+                            valueProvider));
+                }
             }
 
-            paramValues[key.ToHelmValuesSectionName()] = value ?? string.Empty;
+            paramValues[valuesKey] = value ?? string.Empty;
+
+            // Capture container image references for deploy-time registry resolution.
+            // During publish, the default image name (e.g., "server:latest") is written to values.yaml.
+            // During deploy, the ContainerImageReference resolves the full registry-prefixed name
+            // (e.g., "myregistry.azurecr.io/server:latest") and writes it to the override file.
+            if (helmExpressionWithValue.ImageResource is not null)
+            {
+                environment?.CapturedHelmImageReferences.Add(
+                    new KubernetesEnvironmentResource.CapturedHelmImageReference(
+                        helmKey,
+                        resource.Name.ToHelmValuesSectionName(),
+                        valuesKey,
+                        helmExpressionWithValue.ImageResource));
+            }
         }
 
         if (paramValues.Count > 0)
@@ -177,7 +388,7 @@ internal sealed class KubernetesPublishingContext(
         }
 
         var resourceName = templatedItem.Metadata.Name;
-        if (resourceName.StartsWith($"{baseName.ToLowerInvariant()}-"))
+        if (resourceName.StartsWith($"{baseName.ToLowerInvariant()}-", StringComparison.Ordinal))
         {
             resourceName = resourceName.Substring(baseName.Length + 1); // +1 for the hyphen
         }
@@ -195,6 +406,8 @@ internal sealed class KubernetesPublishingContext(
 
     private async Task WriteKubernetesHelmChartAsync(KubernetesEnvironmentResource environment)
     {
+        await ResolveHelmChartMetadataAsync(environment).ConfigureAwait(false);
+
         var helmChart = new HelmChart
         {
             Name = environment.HelmChartName,
@@ -211,5 +424,55 @@ internal sealed class KubernetesPublishingContext(
         var outputFile = Path.Combine(OutputPath, "Chart.yaml");
         Directory.CreateDirectory(OutputPath);
         await File.WriteAllTextAsync(outputFile, chartYaml, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves Helm chart name/version/description annotations (set via
+    /// <see cref="HelmChartOptions"/>) and assigns the resolved values onto the
+    /// environment's internal <c>HelmChart*</c> properties so that Chart.yaml is
+    /// generated with the user-configured values on the first write.
+    /// </summary>
+    private async Task ResolveHelmChartMetadataAsync(KubernetesEnvironmentResource environment)
+    {
+        if (environment.TryGetLastAnnotation<HelmChartNameAnnotation>(out var nameAnnotation))
+        {
+            var name = await nameAnnotation.Name.GetValueAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                HelmChartOptions.ValidateChartName(name, nameof(HelmChartOptions.WithChartName));
+                environment.HelmChartName = name;
+            }
+        }
+
+        if (environment.TryGetLastAnnotation<HelmChartVersionAnnotation>(out var versionAnnotation))
+        {
+            var version = await versionAnnotation.Version.GetValueAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                HelmChartOptions.ValidateChartVersion(version, nameof(HelmChartOptions.WithChartVersion));
+                environment.HelmChartVersion = version;
+            }
+        }
+
+        if (environment.TryGetLastAnnotation<HelmChartDescriptionAnnotation>(out var descriptionAnnotation))
+        {
+            var description = await descriptionAnnotation.Description.GetValueAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                HelmChartOptions.ValidateChartDescription(description, nameof(HelmChartOptions.WithChartDescription));
+                environment.HelmChartDescription = description;
+            }
+        }
+    }
+
+    private static void ApplyNodePoolSelector(KubernetesResource serviceResource, KubernetesNodePoolResource nodePool)
+    {
+        var podSpec = serviceResource.Workload?.PodTemplate?.Spec;
+        if (podSpec is null)
+        {
+            return;
+        }
+
+        podSpec.NodeSelector[nodePool.NodeSelectorLabelKey] = nodePool.Name;
     }
 }

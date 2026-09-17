@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREPROJECTS001
+
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
@@ -10,10 +12,12 @@ public static class DistributedApplicationModelExtensions
 {
     /// <summary>
     /// Returns the compute resources from the <see cref="DistributedApplicationModel"/>.
-    /// Compute resources are those that are either containers or project resources, and are not marked to be ignored by the manifest publishing callback annotation.
+    /// Compute resources are containers, emulators, or resources that support .NET program publishing.
+    /// Resources excluded from publishing and build-only containers are omitted.
     /// </summary>
     /// <param name="model">The distributed application model to extract compute resources from.</param>
     /// <returns>An enumerable of compute <see cref="IResource"/> in the model.</returns>
+    [AspireExportIgnore(Reason = "Application model inspection helper — not part of the ATS surface.")]
     public static IEnumerable<IResource> GetComputeResources(this DistributedApplicationModel model)
     {
         foreach (var r in model.Resources)
@@ -23,7 +27,7 @@ public static class DistributedApplicationModelExtensions
                 continue;
             }
 
-            if (!r.IsContainer() && !r.IsEmulator() && r is not ProjectResource)
+            if (!r.IsContainer() && !r.IsEmulator() && !r.SupportsDotnetProgramPublishing())
             {
                 continue;
             }
@@ -43,6 +47,7 @@ public static class DistributedApplicationModelExtensions
     /// </summary>
     /// <param name="model">The distributed application model to extract build resources from.</param>
     /// <returns>An enumerable of build <see cref="IResource"/> in the model.</returns>
+    [AspireExportIgnore(Reason = "Application model inspection helper — not part of the ATS surface.")]
     public static IEnumerable<IResource> GetBuildResources(this DistributedApplicationModel model)
     {
         foreach (var r in model.Resources)
@@ -60,6 +65,7 @@ public static class DistributedApplicationModelExtensions
     /// </summary>
     /// <param name="model">The distributed application model to extract build and push resources from.</param>
     /// <returns>An enumerable of build and push <see cref="IResource"/> in the model.</returns>
+    [AspireExportIgnore(Reason = "Application model inspection helper — not part of the ATS surface.")]
     public static IEnumerable<IResource> GetBuildAndPushResources(this DistributedApplicationModel model)
     {
         foreach (var r in model.Resources)

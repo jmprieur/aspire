@@ -10,29 +10,40 @@ namespace Aspire.Hosting
 {
     public static partial class DevTunnelsResourceBuilderExtensions
     {
+        [AspireExportIgnore(Reason = "Use the dedicated polyglot overload instead.")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> AddDevTunnel(this IDistributedApplicationBuilder builder, string name, string? tunnelId = null, DevTunnels.DevTunnelOptions? options = null) { throw null; }
 
+        [AspireExport("getEndpointByEndpointReference", MethodName = "getTunnelEndpoint")]
         public static ApplicationModel.EndpointReference GetEndpoint(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.EndpointReference targetEndpointReference) { throw null; }
 
+        [AspireExportIgnore(Reason = "IResource parameter type is not ATS-compatible. Use the EndpointReference-based overload instead.")]
         public static ApplicationModel.EndpointReference GetEndpoint(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.IResource resource, string endpointName) { throw null; }
 
+        [AspireExportIgnore(Reason = "Delegates to the IResource-based overload which is already exported.")]
         public static ApplicationModel.EndpointReference GetEndpoint<TResource>(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.IResourceBuilder<TResource> resourceBuilder, string endpointName)
             where TResource : ApplicationModel.IResourceWithEndpoints { throw null; }
 
+        [AspireExport]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithAnonymousAccess(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder) { throw null; }
 
+        [AspireExportIgnore(Reason = "DevTunnelPortOptions is not ATS-compatible. Use the overload with EndpointReference or EndpointReference + bool instead.")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithReference(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.EndpointReference targetEndpoint, DevTunnels.DevTunnelPortOptions? portOptions) { throw null; }
 
+        [AspireExport("withReferenceEndpointAnonymous", MethodName = "withTunnelReferenceAnonymous")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithReference(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.EndpointReference targetEndpoint, bool allowAnonymous) { throw null; }
 
+        [AspireExport("withReferenceEndpoint", MethodName = "withTunnelReference")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithReference(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.EndpointReference targetEndpoint) { throw null; }
 
+        [AspireExportIgnore(Reason = "This method extends generic IResourceBuilder<TResource> and injects dev tunnel service discovery. It requires two IResourceBuilder parameters which makes the polyglot API confusing. Use WithReference on the DevTunnelResource builder instead.")]
         public static ApplicationModel.IResourceBuilder<TResource> WithReference<TResource>(this ApplicationModel.IResourceBuilder<TResource> builder, ApplicationModel.IResourceBuilder<ApplicationModel.IResourceWithEndpoints> targetResource, ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelResource)
             where TResource : ApplicationModel.IResourceWithEnvironment { throw null; }
 
+        [AspireExportIgnore(Reason = "DevTunnelPortOptions is not ATS-compatible. Use the overload with bool allowAnonymous parameter instead.")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithReference<TResource>(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.IResourceBuilder<TResource> resourceBuilder, DevTunnels.DevTunnelPortOptions? portOptions = null)
             where TResource : ApplicationModel.IResourceWithEndpoints { throw null; }
 
+        [AspireExport("withReferenceResourceAnonymous", MethodName = "withTunnelReferenceAll")]
         public static ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> WithReference<TResource>(this ApplicationModel.IResourceBuilder<DevTunnels.DevTunnelResource> tunnelBuilder, ApplicationModel.IResourceBuilder<TResource> resourceBuilder, bool allowAnonymous)
             where TResource : ApplicationModel.IResourceWithEndpoints { throw null; }
     }
@@ -47,6 +58,8 @@ namespace Aspire.Hosting.DevTunnels
         public string? Description { get { throw null; } set { } }
 
         public System.Collections.Generic.List<string>? Labels { get { throw null; } set { } }
+
+        public DevTunnelRegion? Region { get { throw null; } set { } }
     }
 
     public sealed partial class DevTunnelPortOptions
@@ -69,6 +82,24 @@ namespace Aspire.Hosting.DevTunnels
         public DevTunnelPortOptions Options { get { throw null; } }
     }
 
+    public enum DevTunnelRegion
+    {
+        WestEurope = 0,
+        UKSouth = 1,
+        NorthEurope = 2,
+        EastUs = 3,
+        EastUs2 = 4,
+        CentralIndia = 5,
+        WestUs3 = 6,
+        WestUs2 = 7,
+        SoutheastAsia = 8,
+        BrazilSouth = 9,
+        AustraliaCentral = 10,
+        AustraliaEast = 11,
+        JapanEast = 12
+    }
+
+    [System.Diagnostics.DebuggerDisplay("Type = {GetType().Name,nq}, Name = {Name}, TunnelId = {TunnelId}")]
     public sealed partial class DevTunnelResource : ApplicationModel.ExecutableResource
     {
         public DevTunnelResource(string name, string tunnelId, string command, string workingDirectory, DevTunnelOptions? options = null) : base(default!, default!, default!) { }

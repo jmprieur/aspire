@@ -1,0 +1,14 @@
+{
+  "appHost": {
+    "path": "apphost.go",
+    "language": "go"
+  },
+  "features": {
+    "experimentalPolyglot:go": true
+  },
+  "packages": {
+    "Aspire.Hosting.Azure.Sql": "",
+    "Aspire.Hosting.Azure.Provisioning.Sql": "",
+    "Aspire.Hosting.Azure.Storage": ""
+  }
+}

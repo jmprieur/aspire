@@ -1,7 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Aspire.Cli.Tests.Utils;
 using Aspire.Deployment.EndToEnd.Tests.Helpers;
 using Hex1b.Automation;
 using Xunit;
@@ -25,10 +24,10 @@ public sealed class AcaStarterDeploymentTests(ITestOutputHelper output)
             cts.Token, TestContext.Current.CancellationToken);
         var cancellationToken = linkedCts.Token;
 
-        await DeployStarterTemplateToAzureContainerAppsCore(cancellationToken);
+        await DeployStarterTemplateToAzureContainerAppsCore(false, nameof(DeployStarterTemplateToAzureContainerApps), cancellationToken);
     }
 
-    private async Task DeployStarterTemplateToAzureContainerAppsCore(CancellationToken cancellationToken)
+    internal async Task DeployStarterTemplateToAzureContainerAppsCore(bool useDotnetProject, string testName, CancellationToken cancellationToken)
     {
         // Validate prerequisites
         var subscriptionId = AzureAuthenticationHelpers.TryGetSubscriptionId();
@@ -49,15 +48,15 @@ public sealed class AcaStarterDeploymentTests(ITestOutputHelper output)
             }
         }
 
-        var workspace = TemporaryWorkspace.Create(output);
+        using var workspace = TemporaryWorkspace.Create(output);
         var startTime = DateTime.UtcNow;
         var deploymentUrls = new Dictionary<string, string>();
         // Generate a unique resource group name with pattern: e2e-[testcasename]-[runid]-[attempt]
-        var resourceGroupName = DeploymentE2ETestHelpers.GenerateResourceGroupName("starter");
+        var resourceGroupName = DeploymentE2ETestHelpers.GenerateResourceGroupName(useDotnetProject ? "starter-v2" : "starter");
         // Project name can be simpler since resource group is explicitly set
         var projectName = "AcaStarter";
 
-        output.WriteLine($"Test: {nameof(DeployStarterTemplateToAzureContainerApps)}");
+        output.WriteLine($"Test: {testName}");
         output.WriteLine($"Project Name: {projectName}");
         output.WriteLine($"Resource Group: {resourceGroupName}");
         output.WriteLine($"Subscription: {subscriptionId[..8]}...");
@@ -65,179 +64,147 @@ public sealed class AcaStarterDeploymentTests(ITestOutputHelper output)
 
         try
         {
-            using var terminal = DeploymentE2ETestHelpers.CreateTestTerminal();
+            using var terminal = DeploymentE2ETestHelpers.CreateTestTerminal(testName: testName);
             var pendingRun = terminal.RunAsync(cancellationToken);
 
-            // Pattern searchers for aspire new interactive prompts
-            var waitingForTemplateSelectionPrompt = new CellPatternSearcher()
-                .FindPattern("> Starter App");
-
-            var waitingForProjectNamePrompt = new CellPatternSearcher()
-                .Find($"Enter the project name ({workspace.WorkspaceRoot.Name}): ");
-
-            var waitingForOutputPathPrompt = new CellPatternSearcher()
-                .Find("Enter the output path:");
-
-            var waitingForUrlsPrompt = new CellPatternSearcher()
-                .Find("Use *.dev.localhost URLs");
-
-            var waitingForRedisPrompt = new CellPatternSearcher()
-                .Find("Use Redis Cache");
-
-            var waitingForTestPrompt = new CellPatternSearcher()
-                .Find("Do you want to create a test project?");
-
-            // Pattern searchers for aspire add prompts
-            var waitingForAddVersionSelectionPrompt = new CellPatternSearcher()
-                .Find("(based on NuGet.config)");
-
-            // Pattern searcher for deployment success
-            var waitingForPipelineSucceeded = new CellPatternSearcher()
-                .Find("PIPELINE SUCCEEDED");
-
             var counter = new SequenceCounter();
-            var sequenceBuilder = new Hex1bTerminalInputSequenceBuilder();
+            var auto = new Hex1bTerminalAutomator(terminal, defaultTimeout: TimeSpan.FromSeconds(500));
 
             // Step 1: Prepare environment
             output.WriteLine("Step 1: Preparing environment...");
-            sequenceBuilder.PrepareEnvironment(workspace, counter);
+            await auto.PrepareEnvironmentAsync(workspace, counter);
 
-            // Step 2: Set up CLI environment (in CI)
+            // Step 2: Set up CLI environment
             // The workflow builds and installs the CLI to ~/.aspire/bin before running tests
             // We just need to source it in the bash session
-            if (DeploymentE2ETestHelpers.IsRunningInCI)
-            {
-                output.WriteLine("Step 2: Using pre-installed Aspire CLI from local build...");
-                // Source the CLI environment (sets PATH and other env vars)
-                sequenceBuilder.SourceAspireCliEnvironment(counter);
-            }
+            await auto.InstallCurrentBuildAspireCliAsync(counter, output);
 
             // Step 3: Create starter project using aspire new with interactive prompts
             output.WriteLine("Step 3: Creating starter project...");
-            sequenceBuilder.Type("aspire new")
-                .Enter()
-                .WaitUntil(s => waitingForTemplateSelectionPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(60))
-                .Enter() // Select first template (Starter App ASP.NET Core/Blazor)
-                .WaitUntil(s => waitingForProjectNamePrompt.Search(s).Count > 0, TimeSpan.FromSeconds(30))
-                .Type(projectName)
-                .Enter()
-                .WaitUntil(s => waitingForOutputPathPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-                .Enter() // Accept default output path
-                .WaitUntil(s => waitingForUrlsPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-                .Enter() // Select "No" for localhost URLs (default)
-                .WaitUntil(s => waitingForRedisPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-                // For Redis prompt, default is "Yes" so we need to select "No" by pressing Down
-                .Key(Hex1b.Input.Hex1bKey.DownArrow)
-                .Enter() // Select "No" for Redis Cache
-                .WaitUntil(s => waitingForTestPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-                .Enter() // Select "No" for test project (default)
-                .WaitForSuccessPrompt(counter, TimeSpan.FromMinutes(5));
+            await auto.AspireNewAsync(projectName, counter, useRedisCache: false);
 
             // Step 4: Navigate to project directory
             output.WriteLine("Step 4: Navigating to project directory...");
-            sequenceBuilder
-                .Type($"cd {projectName}")
-                .Enter()
-                .WaitForSuccessPrompt(counter);
+            await auto.TypeAsync($"cd {projectName}");
+            await auto.EnterAsync();
+            await auto.WaitForSuccessPromptAsync(counter);
 
             // Step 5: Add Aspire.Hosting.Azure.AppContainers package
             output.WriteLine("Step 5: Adding Azure Container Apps hosting package...");
-            sequenceBuilder.Type("aspire add Aspire.Hosting.Azure.AppContainers")
-                .Enter();
+            await auto.TypeAsync("aspire add Aspire.Hosting.Azure.AppContainers");
+            await auto.EnterAsync();
 
-            // In CI, aspire add shows a version selection prompt
-            if (DeploymentE2ETestHelpers.IsRunningInCI)
+            // aspire add may show a version selection prompt
+            await auto.WaitForAspireAddCompletionAsync(counter);
+            if (useDotnetProject)
             {
-                sequenceBuilder
-                    .WaitUntil(s => waitingForAddVersionSelectionPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(60))
-                    .Enter(); // select first version (PR build)
+                await DotnetProjectDeploymentHelpers.AddPackageAsync(auto, counter, "Aspire.Hosting.Dotnet");
             }
 
-            sequenceBuilder.WaitForSuccessPrompt(counter, TimeSpan.FromSeconds(180));
-
             // Step 6: Modify AppHost.cs to add Azure Container App Environment
-            sequenceBuilder.ExecuteCallback(() =>
-            {
-                var projectDir = Path.Combine(workspace.WorkspaceRoot.FullName, projectName);
-                var appHostDir = Path.Combine(projectDir, $"{projectName}.AppHost");
-                var appHostFilePath = Path.Combine(appHostDir, "AppHost.cs");
+            var projectDir = Path.Combine(workspace.WorkspaceRoot.FullName, projectName);
+            var appHostDir = Path.Combine(projectDir, $"{projectName}.AppHost");
+            var appHostFilePath = Path.Combine(appHostDir, "AppHost.cs");
 
-                output.WriteLine($"Looking for AppHost.cs at: {appHostFilePath}");
+            output.WriteLine($"Looking for AppHost.cs at: {appHostFilePath}");
 
-                var content = File.ReadAllText(appHostFilePath);
+            var content = File.ReadAllText(appHostFilePath);
 
-                // Insert the Azure Container App Environment before builder.Build().Run();
-                var buildRunPattern = "builder.Build().Run();";
-                var replacement = """
+            // Insert the Azure Container App Environment before builder.Build().Run();
+            var buildRunPattern = "builder.Build().Run();";
+            var replacement = """
 // Add Azure Container App Environment for deployment
 builder.AddAzureContainerAppEnvironment("infra");
 
 builder.Build().Run();
 """;
 
-                content = content.Replace(buildRunPattern, replacement);
-                File.WriteAllText(appHostFilePath, content);
+            content = DotnetProjectDeploymentHelpers.ReplaceExactlyOnce(content, buildRunPattern, replacement);
+            if (useDotnetProject)
+            {
+                content = "#pragma warning disable ASPIREDOTNETPROJECT001\n" + content;
+                foreach (var (suffix, resource) in new[] { ("ApiService", "apiservice"), ("Web", "webfrontend") })
+                {
+                    content = DotnetProjectDeploymentHelpers.ReplaceExactlyOnce(content,
+                        $"AddProject<Projects.{projectName}_{suffix}>(\"{resource}\")",
+                        $"AddDotnetProject(\"{resource}\", \"../{projectName}.{suffix}/{projectName}.{suffix}.csproj\")");
+                }
+            }
 
-                output.WriteLine($"Modified AppHost.cs at: {appHostFilePath}");
-            });
+            File.WriteAllText(appHostFilePath, content);
+            var marker = $"aca-{Guid.NewGuid():N}";
+            DotnetProjectDeploymentHelpers.ReplaceInFile(Path.Combine(projectDir, $"{projectName}.ApiService", "Program.cs"),
+                "app.Run();", $$"""
+                app.MapGet("/deployment-marker", () => "{{marker}}");
+                app.Run();
+                """);
+            DotnetProjectDeploymentHelpers.ReplaceInFile(Path.Combine(projectDir, $"{projectName}.Web", "Program.cs"),
+                "app.Run();", $$"""
+                app.MapGet("/deployment-marker", async (IHttpClientFactory clients, CancellationToken cancellationToken) =>
+                    "web:" + await clients.CreateClient().GetStringAsync("https+http://apiservice/deployment-marker", cancellationToken));
+                app.Run();
+                """);
+
+            output.WriteLine($"Modified AppHost.cs at: {appHostFilePath}");
 
             // Step 7: Navigate to AppHost project directory
             output.WriteLine("Step 6: Navigating to AppHost directory...");
-            sequenceBuilder
-                .Type($"cd {projectName}.AppHost")
-                .Enter()
-                .WaitForSuccessPrompt(counter);
+            await auto.TypeAsync($"cd {projectName}.AppHost");
+            await auto.EnterAsync();
+            await auto.WaitForSuccessPromptAsync(counter);
 
             // Step 8: Set environment variables for deployment
             // - Unset ASPIRE_PLAYGROUND to avoid conflicts
             // - Set Azure location
             // - Set AZURE__RESOURCEGROUP to use our unique resource group name
-            sequenceBuilder.Type($"unset ASPIRE_PLAYGROUND && export AZURE__LOCATION=westus3 && export AZURE__RESOURCEGROUP={resourceGroupName}")
-                .Enter()
-                .WaitForSuccessPrompt(counter);
+            await auto.TypeAsync($"unset ASPIRE_PLAYGROUND && export AZURE__LOCATION=westus3 AZURE__RESOURCEGROUP={resourceGroupName} AZURE__SUBSCRIPTIONID={subscriptionId}");
+            await auto.EnterAsync();
+            await auto.WaitForSuccessPromptAsync(counter);
 
             // Step 9: Deploy to Azure Container Apps using aspire deploy
             // Use --clear-cache to ensure fresh deployment without cached location from previous runs
             output.WriteLine("Step 7: Starting Azure Container Apps deployment...");
-            sequenceBuilder
-                .Type("aspire deploy --clear-cache")
-                .Enter()
-                // Wait for pipeline to complete successfully
-                .WaitUntil(s => waitingForPipelineSucceeded.Search(s).Count > 0, TimeSpan.FromMinutes(30))
-                .WaitForSuccessPrompt(counter, TimeSpan.FromMinutes(2));
+            await auto.TypeAsync("aspire deploy --clear-cache");
+            await auto.EnterAsync();
+            // Wait for pipeline to complete successfully
+            await auto.WaitForPipelineSuccessAsync(timeout: TimeSpan.FromMinutes(30));
+            await auto.WaitForSuccessPromptAsync(counter, TimeSpan.FromMinutes(2));
 
-            // Step 10: Extract deployment URLs and verify endpoints with retry
-            // Retry each endpoint for up to 3 minutes (18 attempts * 10 seconds)
-            output.WriteLine("Step 8: Verifying deployed endpoints...");
-            sequenceBuilder
-                .Type($"RG_NAME=\"{resourceGroupName}\" && " +
-                      "echo \"Resource group: $RG_NAME\" && " +
-                      "if ! az group show -n \"$RG_NAME\" &>/dev/null; then echo \"❌ Resource group not found\"; exit 1; fi && " +
-                      // Get external endpoints only (exclude .internal. which are not publicly accessible)
-                      "urls=$(az containerapp list -g \"$RG_NAME\" --query \"[].properties.configuration.ingress.fqdn\" -o tsv 2>/dev/null | grep -v '\\.internal\\.') && " +
-                      "if [ -z \"$urls\" ]; then echo \"❌ No external container app endpoints found\"; exit 1; fi && " +
-                      "failed=0 && " +
-                      "for url in $urls; do " +
-                      "echo \"Checking https://$url...\"; " +
-                      "success=0; " +
-                      "for i in $(seq 1 18); do " +
-                      "STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \"https://$url\" --max-time 10 2>/dev/null); " +
-                      "if [ \"$STATUS\" = \"200\" ] || [ \"$STATUS\" = \"302\" ]; then echo \"  ✅ $STATUS (attempt $i)\"; success=1; break; fi; " +
-                      "echo \"  Attempt $i: $STATUS, retrying in 10s...\"; sleep 10; " +
-                      "done; " +
-                      "if [ \"$success\" -eq 0 ]; then echo \"  ❌ Failed after 18 attempts\"; failed=1; fi; " +
-                      "done && " +
-                      "if [ \"$failed\" -ne 0 ]; then echo \"❌ One or more endpoint checks failed\"; exit 1; fi")
-                .Enter()
-                .WaitForSuccessPrompt(counter, TimeSpan.FromMinutes(5));
+            // A fresh source marker traverses both .NET images and the template's service-discovery reference.
+            // Checking arbitrary ingress URLs also reaches the dashboard and cannot prove this path works.
+            var frontendUrlFile = Path.Combine(projectDir, "frontend-url.txt");
+            await DotnetProjectDeploymentHelpers.RunScriptAsync(auto, counter, $$"""
+                set -euo pipefail
+                az() { command az "$@" --subscription {{subscriptionId}}; }
+                for resource in apiservice webfrontend; do
+                    app=$(az containerapp list -g {{resourceGroupName}} --query "[?starts_with(name, '$resource')].name" -o tsv)
+                    [ "$(printf '%s\n' "$app" | wc -l)" -eq 1 ] && [ -n "$app" ]
+                    revision=$(az containerapp show -g {{resourceGroupName}} -n "$app" --query properties.latestRevisionName -o tsv)
+                    ready=""
+                    for attempt in $(seq 1 18); do
+                        ready=$(az containerapp show -g {{resourceGroupName}} -n "$app" --query properties.latestReadyRevisionName -o tsv)
+                        [ -n "$revision" ] && [ "$revision" = "$ready" ] && break
+                        sleep 10
+                    done
+                    [ -n "$revision" ] && [ "$revision" = "$ready" ]
+                    image=$(az containerapp show -g {{resourceGroupName}} -n "$app" --query "properties.template.containers[0].image" -o tsv)
+                    running_image=$(az containerapp revision show -g {{resourceGroupName}} -n "$app" --revision "$revision" --query "properties.template.containers[0].image" -o tsv)
+                    case "$image" in *.azurecr.io/*) ;; *) exit 1;; esac
+                    [ "$image" = "$running_image" ]
+                    echo "$resource: $revision $running_image"
+                    if [ "$resource" = webfrontend ]; then
+                        az containerapp show -g {{resourceGroupName}} -n "$app" --query properties.configuration.ingress.fqdn -o tsv > {{AspireCliShellCommandHelpers.QuoteBashArg(frontendUrlFile)}}
+                    fi
+                done
+                """, TimeSpan.FromMinutes(9));
+            var frontendUrl = $"https://{File.ReadAllText(frontendUrlFile).Trim()}";
+            await DotnetProjectDeploymentHelpers.VerifyResponseAsync($"{frontendUrl}/deployment-marker", $"web:{marker}", cancellationToken);
+            deploymentUrls["webfrontend"] = frontendUrl;
 
             // Step 11: Exit terminal
-            sequenceBuilder
-                .Type("exit")
-                .Enter();
+            await auto.TypeAsync("exit");
+            await auto.EnterAsync();
 
-            var sequence = sequenceBuilder.Build();
-            await sequence.ApplyAsync(terminal, cancellationToken);
             await pendingRun;
 
             var duration = DateTime.UtcNow - startTime;
@@ -245,7 +212,7 @@ builder.Build().Run();
 
             // Report success
             DeploymentReporter.ReportDeploymentSuccess(
-                nameof(DeployStarterTemplateToAzureContainerApps),
+                testName,
                 resourceGroupName,
                 deploymentUrls,
                 duration);
@@ -258,7 +225,7 @@ builder.Build().Run();
             output.WriteLine($"❌ Test failed after {duration}: {ex.Message}");
 
             DeploymentReporter.ReportDeploymentFailure(
-                nameof(DeployStarterTemplateToAzureContainerApps),
+                testName,
                 resourceGroupName,
                 ex.Message,
                 ex.StackTrace);
@@ -269,40 +236,7 @@ builder.Build().Run();
         {
             // Clean up the resource group we created
             output.WriteLine($"Triggering cleanup of resource group: {resourceGroupName}");
-            TriggerCleanupResourceGroup(resourceGroupName, output);
-            DeploymentReporter.ReportCleanupStatus(resourceGroupName, success: true, "Cleanup triggered (fire-and-forget)");
-        }
-    }
-
-    /// <summary>
-    /// Triggers cleanup of a specific resource group.
-    /// This is fire-and-forget - the hourly cleanup workflow handles any missed resources.
-    /// </summary>
-    private static void TriggerCleanupResourceGroup(string resourceGroupName, ITestOutputHelper output)
-    {
-        // Fire and forget - trigger deletion of the specific resource group created by this test
-        // The cleanup workflow will handle any that don't get deleted
-        var process = new System.Diagnostics.Process
-        {
-            StartInfo = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "az",
-                Arguments = $"group delete --name {resourceGroupName} --yes --no-wait",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-
-        try
-        {
-            process.Start();
-            output.WriteLine($"Cleanup triggered for resource group: {resourceGroupName}");
-        }
-        catch (Exception ex)
-        {
-            output.WriteLine($"Failed to trigger cleanup: {ex.Message}");
+            await DotnetProjectDeploymentHelpers.CleanupAsync(resourceGroupName, subscriptionId, output);
         }
     }
 }

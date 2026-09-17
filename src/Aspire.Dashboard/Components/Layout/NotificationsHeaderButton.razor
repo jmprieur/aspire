@@ -1,0 +1,27 @@
+﻿@using Aspire.Dashboard.Resources
+
+@if (UnreadCount > 0)
+{
+    <FluentCounterBadge Count="@UnreadCount"
+                        OverflowCount="9"
+                        Color="BadgeColor.Brand"
+                        Appearance="BadgeAppearance.Filled"
+                        Class="notification-counter-badge"
+                        Style="border: 0;">
+        <AnchorContent>
+            <FluentButton Class="header-button"
+                          Appearance="ButtonAppearance.Default" OnClick="@HandleClick"
+                          Title="@Loc[nameof(Layout.MainLayoutLaunchNotifications)]" aria-label="@Loc[nameof(Layout.MainLayoutLaunchNotifications)]">
+                <FluentIcon Value="@(new Icons.Regular.Size24.Alert())" Color="Color.Default" Style="vertical-align: bottom;" />
+            </FluentButton>
+        </AnchorContent>
+    </FluentCounterBadge>
+}
+else
+{
+    <FluentButton Class="header-button"
+                  Appearance="ButtonAppearance.Default" OnClick="@HandleClick"
+                  Title="@Loc[nameof(Layout.MainLayoutLaunchNotifications)]" aria-label="@Loc[nameof(Layout.MainLayoutLaunchNotifications)]">
+        <FluentIcon Value="@(new Icons.Regular.Size24.Alert())" Color="Color.Default" />
+    </FluentButton>
+}

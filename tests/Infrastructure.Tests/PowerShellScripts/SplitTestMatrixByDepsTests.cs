@@ -12,7 +12,7 @@ namespace Infrastructure.Tests;
 /// </summary>
 public class SplitTestMatrixByDepsTests : IDisposable
 {
-    private readonly TestTempDirectory _tempDir = new();
+    private readonly TemporaryWorkspace _workspace;
     private readonly string _scriptPath;
     private readonly string _githubOutputFile;
     private readonly ITestOutputHelper _output;
@@ -20,12 +20,13 @@ public class SplitTestMatrixByDepsTests : IDisposable
     public SplitTestMatrixByDepsTests(ITestOutputHelper output)
     {
         _output = output;
-        _scriptPath = Path.Combine(FindRepoRoot(), "eng", "scripts", "split-test-matrix-by-deps.ps1");
-        _githubOutputFile = Path.Combine(_tempDir.Path, "github_output.txt");
+        _workspace = TemporaryWorkspace.Create(output);
+        _scriptPath = Path.Combine(RepoRoot.Path, "eng", "scripts", "split-test-matrix-by-deps.ps1");
+        _githubOutputFile = Path.Combine(_workspace.Path, "github_output.txt");
         File.WriteAllText(_githubOutputFile, "");
     }
 
-    public void Dispose() => _tempDir.Dispose();
+    public void Dispose() => _workspace.Dispose();
 
     [Fact]
     [RequiresTools(["pwsh"])]
@@ -41,7 +42,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
         var outputs = ParseGitHubOutputFile();
         Assert.Equal(2, outputs["tests_matrix_no_nugets"].Include.Length);
-        Assert.Empty(outputs["tests_matrix_requires_nugets"].Include);
+        Assert.Empty(outputs["tests_matrix_requires_nugets_linux"].Include);
         Assert.Empty(outputs["tests_matrix_requires_cli_archive"].Include);
     }
 
@@ -51,7 +52,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
     {
         var matrixJson = BuildMatrixJson(
             new { name = "Plain", shortname = "p", runs_on = "ubuntu-latest" },
-            new { name = "NugetTest", shortname = "nt", runs_on = "ubuntu-latest", requiresNugets = true });
+            new { name = "NugetTest", shortname = "nt", runs_on = "ubuntu-latest", properties = new { requiresNugets = true } });
 
         var result = await RunScript(allTestsMatrix: matrixJson);
 
@@ -60,8 +61,30 @@ public class SplitTestMatrixByDepsTests : IDisposable
         var outputs = ParseGitHubOutputFile();
         Assert.Single(outputs["tests_matrix_no_nugets"].Include);
         Assert.Equal("Plain", outputs["tests_matrix_no_nugets"].Include[0].Name);
-        Assert.Single(outputs["tests_matrix_requires_nugets"].Include);
-        Assert.Equal("NugetTest", outputs["tests_matrix_requires_nugets"].Include[0].Name);
+        Assert.Single(outputs["tests_matrix_requires_nugets_linux"].Include);
+        Assert.Equal("NugetTest", outputs["tests_matrix_requires_nugets_linux"].Include[0].Name);
+    }
+
+    [Fact]
+    [RequiresTools(["pwsh"])]
+    public async Task SplitsRequiresNugetsByOs()
+    {
+        var matrixJson = BuildMatrixJson(
+            new { name = "LinuxNuget", shortname = "ln", runs_on = "ubuntu-latest", properties = new { requiresNugets = true } },
+            new { name = "WinNuget", shortname = "wn", runs_on = "windows-latest", properties = new { requiresNugets = true } },
+            new { name = "MacNuget", shortname = "mn", runs_on = "macos-latest", properties = new { requiresNugets = true } });
+
+        var result = await RunScript(allTestsMatrix: matrixJson);
+
+        result.EnsureSuccessful();
+
+        var outputs = ParseGitHubOutputFile();
+        Assert.Single(outputs["tests_matrix_requires_nugets_linux"].Include);
+        Assert.Equal("LinuxNuget", outputs["tests_matrix_requires_nugets_linux"].Include[0].Name);
+        Assert.Single(outputs["tests_matrix_requires_nugets_windows"].Include);
+        Assert.Equal("WinNuget", outputs["tests_matrix_requires_nugets_windows"].Include[0].Name);
+        Assert.Single(outputs["tests_matrix_requires_nugets_macos"].Include);
+        Assert.Equal("MacNuget", outputs["tests_matrix_requires_nugets_macos"].Include[0].Name);
     }
 
     [Fact]
@@ -70,7 +93,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
     {
         var matrixJson = BuildMatrixJson(
             new { name = "Plain", shortname = "p", runs_on = "ubuntu-latest" },
-            new { name = "CliTest", shortname = "ct", runs_on = "ubuntu-latest", requiresCliArchive = true });
+            new { name = "CliTest", shortname = "ct", runs_on = "ubuntu-latest", properties = new { requiresCliArchive = true } });
 
         var result = await RunScript(allTestsMatrix: matrixJson);
 
@@ -87,7 +110,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
     public async Task CliArchiveTakesPriorityOverNugets()
     {
         var matrixJson = BuildMatrixJson(
-            new { name = "Both", shortname = "b", runs_on = "ubuntu-latest", requiresNugets = true, requiresCliArchive = true });
+            new { name = "Both", shortname = "b", runs_on = "ubuntu-latest", properties = new { requiresNugets = true, requiresCliArchive = true } });
 
         var result = await RunScript(allTestsMatrix: matrixJson);
 
@@ -95,43 +118,24 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
         var outputs = ParseGitHubOutputFile();
         Assert.Single(outputs["tests_matrix_requires_cli_archive"].Include);
-        Assert.Empty(outputs["tests_matrix_requires_nugets"].Include);
+        Assert.Empty(outputs["tests_matrix_requires_nugets_linux"].Include);
     }
 
     [Fact]
     [RequiresTools(["pwsh"])]
-    public async Task OverflowsEntriesBeyondThreshold()
+    public async Task FailsWhenNoNugetsMatrixExceedsGitHubLimit()
     {
-        var entries = Enumerable.Range(1, 8).Select(i =>
+        var entries = Enumerable.Range(1, 257).Select(i =>
             (object)new { name = $"T{i}", shortname = $"t{i}", runs_on = "ubuntu-latest" }).ToArray();
 
         var matrixJson = BuildMatrixJson(entries);
 
-        var result = await RunScript(allTestsMatrix: matrixJson, overflowThreshold: 5);
+        var result = await RunScript(allTestsMatrix: matrixJson);
 
-        result.EnsureSuccessful();
-
-        var outputs = ParseGitHubOutputFile();
-        Assert.Equal(5, outputs["tests_matrix_no_nugets"].Include.Length);
-        Assert.Equal(3, outputs["tests_matrix_no_nugets_overflow"].Include.Length);
-    }
-
-    [Fact]
-    [RequiresTools(["pwsh"])]
-    public async Task NoOverflowWhenBelowThreshold()
-    {
-        var entries = Enumerable.Range(1, 5).Select(i =>
-            (object)new { name = $"T{i}", shortname = $"t{i}", runs_on = "ubuntu-latest" }).ToArray();
-
-        var matrixJson = BuildMatrixJson(entries);
-
-        var result = await RunScript(allTestsMatrix: matrixJson, overflowThreshold: 10);
-
-        result.EnsureSuccessful();
-
-        var outputs = ParseGitHubOutputFile();
-        Assert.Equal(5, outputs["tests_matrix_no_nugets"].Include.Length);
-        Assert.Empty(outputs["tests_matrix_no_nugets_overflow"].Include);
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("tests_matrix_no_nugets", result.Output, StringComparison.Ordinal);
+        Assert.Contains("257 entries", result.Output, StringComparison.Ordinal);
+        Assert.Contains("limit of 256", result.Output, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -146,14 +150,15 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
         var outputs = ParseGitHubOutputFile();
         Assert.Empty(outputs["tests_matrix_no_nugets"].Include);
-        Assert.Empty(outputs["tests_matrix_no_nugets_overflow"].Include);
-        Assert.Empty(outputs["tests_matrix_requires_nugets"].Include);
+        Assert.Empty(outputs["tests_matrix_requires_nugets_linux"].Include);
+        Assert.Empty(outputs["tests_matrix_requires_nugets_windows"].Include);
+        Assert.Empty(outputs["tests_matrix_requires_nugets_macos"].Include);
         Assert.Empty(outputs["tests_matrix_requires_cli_archive"].Include);
     }
 
     [Fact]
     [RequiresTools(["pwsh"])]
-    public async Task AllFourOutputKeysAlwaysPresent()
+    public async Task AllOutputKeysAlwaysPresent()
     {
         var matrixJson = BuildMatrixJson(
             new { name = "T", shortname = "t", runs_on = "ubuntu-latest" });
@@ -164,8 +169,9 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
         var outputs = ParseGitHubOutputFile();
         Assert.True(outputs.ContainsKey("tests_matrix_no_nugets"));
-        Assert.True(outputs.ContainsKey("tests_matrix_no_nugets_overflow"));
-        Assert.True(outputs.ContainsKey("tests_matrix_requires_nugets"));
+        Assert.True(outputs.ContainsKey("tests_matrix_requires_nugets_linux"));
+        Assert.True(outputs.ContainsKey("tests_matrix_requires_nugets_windows"));
+        Assert.True(outputs.ContainsKey("tests_matrix_requires_nugets_macos"));
         Assert.True(outputs.ContainsKey("tests_matrix_requires_cli_archive"));
     }
 
@@ -176,7 +182,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
         var matrixJson = BuildMatrixJson(
             new { name = "FromFile", shortname = "ff", runs_on = "ubuntu-latest" });
 
-        var matrixFile = Path.Combine(_tempDir.Path, "matrix.json");
+        var matrixFile = Path.Combine(_workspace.Path, "matrix.json");
         File.WriteAllText(matrixFile, matrixJson);
 
         var result = await RunScript(allTestsMatrixFile: matrixFile);
@@ -205,7 +211,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
     [RequiresTools(["pwsh"])]
     public async Task FailsWhenMatrixFileNotFound()
     {
-        var nonExistentFile = Path.Combine(_tempDir.Path, "nonexistent.json");
+        var nonExistentFile = Path.Combine(_workspace.Path, "nonexistent.json");
 
         using var cmd = new PowerShellCommand(_scriptPath, _output)
             .WithTimeout(TimeSpan.FromMinutes(2))
@@ -220,8 +226,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
     private async Task<CommandResult> RunScript(
         string? allTestsMatrix = null,
-        string? allTestsMatrixFile = null,
-        int? overflowThreshold = null)
+        string? allTestsMatrixFile = null)
     {
         using var cmd = new PowerShellCommand(_scriptPath, _output)
             .WithTimeout(TimeSpan.FromMinutes(2))
@@ -232,7 +237,7 @@ public class SplitTestMatrixByDepsTests : IDisposable
         if (!string.IsNullOrEmpty(allTestsMatrix))
         {
             // Write JSON to a temp file to avoid command-line quoting issues
-            var tempMatrixFile = Path.Combine(_tempDir.Path, $"matrix_input_{Guid.NewGuid():N}.json");
+            var tempMatrixFile = Path.Combine(_workspace.Path, $"matrix_input_{Guid.NewGuid():N}.json");
             File.WriteAllText(tempMatrixFile, allTestsMatrix);
             args.Add("-AllTestsMatrixFile");
             args.Add($"\"{tempMatrixFile}\"");
@@ -244,12 +249,6 @@ public class SplitTestMatrixByDepsTests : IDisposable
             args.Add($"\"{allTestsMatrixFile}\"");
         }
 
-        if (overflowThreshold.HasValue)
-        {
-            args.Add("-OverflowThreshold");
-            args.Add(overflowThreshold.Value.ToString());
-        }
-
         args.Add("-OutputToGitHubEnv");
 
         return await cmd.ExecuteAsync(args.ToArray());
@@ -257,7 +256,21 @@ public class SplitTestMatrixByDepsTests : IDisposable
 
     private static string BuildMatrixJson(params object[] entries)
     {
-        var matrix = new { include = entries };
+        // Use dictionaries to produce JSON with the exact property names the PS script expects.
+        // In particular, 'runs-on' requires a hyphen which C# identifiers cannot express.
+        var convertedEntries = new List<Dictionary<string, object>>();
+        foreach (var entry in entries)
+        {
+            var dict = new Dictionary<string, object>();
+            foreach (var prop in entry.GetType().GetProperties())
+            {
+                var key = prop.Name == "runs_on" ? "runs-on" : prop.Name;
+                dict[key] = prop.GetValue(entry)!;
+            }
+            convertedEntries.Add(dict);
+        }
+
+        var matrix = new { include = convertedEntries };
         return JsonSerializer.Serialize(matrix);
     }
 
@@ -306,19 +319,5 @@ public class SplitTestMatrixByDepsTests : IDisposable
         }
 
         return new GitHubActionsMatrix { Include = entries };
-    }
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "Aspire.slnx")))
-            {
-                return dir.FullName;
-            }
-            dir = dir.Parent;
-        }
-        throw new InvalidOperationException("Could not find repository root");
     }
 }

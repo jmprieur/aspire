@@ -1,10 +1,9 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using Aspire.Cli.Tests.Utils;
 using Hex1b;
-using Hex1b.Automation;
 
 namespace Aspire.Deployment.EndToEnd.Tests.Helpers;
 
@@ -35,13 +34,20 @@ internal static class DeploymentE2ETestHelpers
     }
 
     /// <summary>
-    /// Gets the commit SHA from the GITHUB_PR_HEAD_SHA environment variable.
+    /// Gets the commit SHA from the GITHUB_PR_HEAD_SHA environment variable,
+    /// falling back to GITHUB_SHA for non-PR CI runs (e.g., schedule-triggered workflows).
     /// When running locally (not in CI), returns "local0000".
     /// </summary>
     internal static string GetCommitSha()
     {
         var commitSha = Environment.GetEnvironmentVariable("GITHUB_PR_HEAD_SHA");
-        return string.IsNullOrEmpty(commitSha) ? "local0000" : commitSha;
+        if (!string.IsNullOrEmpty(commitSha))
+        {
+            return commitSha;
+        }
+
+        var githubSha = Environment.GetEnvironmentVariable("GITHUB_SHA");
+        return string.IsNullOrEmpty(githubSha) ? "local0000" : githubSha;
     }
 
     /// <summary>
@@ -78,6 +84,15 @@ internal static class DeploymentE2ETestHelpers
     }
 
     /// <summary>
+    /// Gets the install strategy for exercising the current build under deployment E2E.
+    /// CI uses the CLI already preinstalled by the workflow, while local runs honor explicit strategy overrides.
+    /// </summary>
+    internal static CliInstallStrategy GetCurrentBuildCliInstallStrategy()
+    {
+        return IsRunningInCI ? CliInstallStrategy.Preinstalled() : CliInstallStrategy.Detect();
+    }
+
+    /// <summary>
     /// Creates a headless Hex1b terminal configured for deployment E2E testing with asciinema recording.
     /// Uses default dimensions of 160x48 unless overridden.
     /// </summary>
@@ -108,70 +123,85 @@ internal static class DeploymentE2ETestHelpers
     }
 
     /// <summary>
-    /// Prepares the terminal environment with a custom prompt for command tracking.
+    /// Stops a detached AppHost out-of-band, without going through the test terminal.
     /// </summary>
-    internal static Hex1bTerminalInputSequenceBuilder PrepareEnvironment(
-        this Hex1bTerminalInputSequenceBuilder builder,
-        TemporaryWorkspace workspace,
-        SequenceCounter counter)
+    /// <remarks>
+    /// Run-mode tests bind <c>terminal.RunAsync</c> to the test's cancellation token, so when the
+    /// overall test timeout fires the terminal is gone and an <c>aspire stop</c> typed into it can
+    /// never run — the detached AppHost would keep provisioning into a resource group that cleanup
+    /// is about to delete. Launching the CLI directly keeps the stop working on that path, and gives
+    /// it a timeout independent of the test budget. <c>StopCommand</c> locates the AppHost from the
+    /// working directory rather than from terminal state, so running it out-of-band is equivalent.
+    /// </remarks>
+    internal static async Task StopAppHostAsync(string workspacePath, Action<string> log)
     {
-        var waitingForInputPattern = new CellPatternSearcher()
-            .Find("b").RightUntil("$").Right(' ').Right(' ');
+        try
+        {
+            var cliPath = ResolveAspireCliPath();
+            if (cliPath is null)
+            {
+                log("Skipping AppHost stop: could not locate the aspire CLI.");
+                return;
+            }
 
-        builder.WaitUntil(s => waitingForInputPattern.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-            .Wait(500);
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = cliPath,
+                    Arguments = "stop --non-interactive",
+                    WorkingDirectory = workspacePath,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false
+                }
+            };
 
-        // Bash prompt setup with command tracking
-        const string promptSetup = "CMDCOUNT=0; PROMPT_COMMAND='s=$?;((CMDCOUNT++));PS1=\"[$CMDCOUNT $([ $s -eq 0 ] && echo OK || echo ERR:$s)] \\$ \"'";
-        builder.Type(promptSetup).Enter();
+            process.Start();
 
-        return builder.WaitForSuccessPrompt(counter)
-            .Type($"cd {workspace.WorkspaceRoot.FullName}").Enter()
-            .WaitForSuccessPrompt(counter);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token);
+                log($"AppHost stop exited with code {process.ExitCode}.");
+            }
+            catch (OperationCanceledException)
+            {
+                // A hung stop must not block resource group cleanup, which is the step that actually
+                // stops us paying for the deployment.
+                process.Kill(entireProcessTree: true);
+                log("AppHost stop timed out after 2 minutes and was killed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            log($"Failed to stop AppHost: {ex.Message}");
+        }
     }
 
     /// <summary>
-    /// Installs the Aspire CLI from PR build artifacts.
+    /// Locates the installed aspire CLI, checking the PR-isolated, current, and legacy install layouts.
     /// </summary>
-    internal static Hex1bTerminalInputSequenceBuilder InstallAspireCliFromPullRequest(
-        this Hex1bTerminalInputSequenceBuilder builder,
-        int prNumber,
-        SequenceCounter counter)
+    private static string? ResolveAspireCliPath()
     {
-        var command = $"curl -fsSL https://raw.githubusercontent.com/dotnet/aspire/main/eng/scripts/get-aspire-cli-pr.sh | bash -s -- {prNumber}";
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-        return builder
-            .Type(command)
-            .Enter()
-            .WaitForSuccessPrompt(counter, TimeSpan.FromSeconds(300));
+        var candidates = new List<string>();
+
+        // The PR install route isolates the CLI under a per-PR directory rather than the shared bin dir:
+        //   compute_cli_install_dir() -> "$INSTALL_PREFIX/dogfood/pr-$PR_NUMBER/bin"  (INSTALL_PREFIX=$HOME/.aspire)
+        // See eng/scripts/get-aspire-cli-pr.sh. CliInstallStrategy.Detect() selects that route whenever
+        // GITHUB_PR_NUMBER and GITHUB_PR_HEAD_SHA are set, so probe it first: a PR-route machine may have
+        // no CLI in the shared layout at all, and falling through would silently skip the AppHost stop.
+        var prNumber = Environment.GetEnvironmentVariable("GITHUB_PR_NUMBER");
+        if (!string.IsNullOrEmpty(prNumber))
+        {
+            candidates.Add(Path.Combine(home, ".aspire", "dogfood", $"pr-{prNumber}", "bin", "aspire"));
+        }
+
+        candidates.Add(Path.Combine(home, ".aspire", "bin", "aspire"));
+        candidates.Add(Path.Combine(home, ".aspire", "aspire"));
+
+        return candidates.Find(File.Exists);
     }
-
-    /// <summary>
-    /// Installs the latest GA (release quality) Aspire CLI.
-    /// </summary>
-    internal static Hex1bTerminalInputSequenceBuilder InstallAspireCliRelease(
-        this Hex1bTerminalInputSequenceBuilder builder,
-        SequenceCounter counter)
-    {
-        var command = "curl -fsSL https://aka.ms/aspire/get/install.sh | bash -s -- --quality release";
-
-        return builder
-            .Type(command)
-            .Enter()
-            .WaitForSuccessPrompt(counter, TimeSpan.FromSeconds(300));
-    }
-
-    /// <summary>
-    /// Configures the PATH and environment variables for the Aspire CLI.
-    /// </summary>
-    internal static Hex1bTerminalInputSequenceBuilder SourceAspireCliEnvironment(
-        this Hex1bTerminalInputSequenceBuilder builder,
-        SequenceCounter counter)
-    {
-        return builder
-            .Type("export PATH=~/.aspire/bin:$PATH ASPIRE_PLAYGROUND=true DOTNET_CLI_TELEMETRY_OPTOUT=true DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true DOTNET_GENERATE_ASPNET_CERTIFICATE=false")
-            .Enter()
-            .WaitForSuccessPrompt(counter);
-    }
-
 }

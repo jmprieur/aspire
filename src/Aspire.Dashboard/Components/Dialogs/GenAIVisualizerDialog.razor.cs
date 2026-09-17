@@ -14,6 +14,7 @@ using Aspire.Dashboard.Utils;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Localization;
 using Microsoft.FluentUI.AspNetCore.Components;
+using Microsoft.JSInterop;
 using Icons = Microsoft.FluentUI.AspNetCore.Components.Icons;
 
 namespace Aspire.Dashboard.Components.Dialogs;
@@ -24,6 +25,7 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
     private static readonly Icon s_toolIcon = new Icons.Regular.Size16.Code();
 
     private readonly string _copyButtonId = $"copy-{Guid.NewGuid():N}";
+    private readonly CancellationTokenSource _cts = new();
 
     private MarkdownProcessor _markdownProcess = default!;
     private Subscription? _resourcesSubscription;
@@ -32,6 +34,7 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
 
     private List<OtlpSpan> _contextSpans = default!;
     private int _currentSpanContextIndex;
+    private long _contentUpdateVersion;
     private GenAIVisualizerDialogViewModel? _content;
 
     private GenAIItemViewModel? SelectedItem { get; set; }
@@ -46,7 +49,9 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
     public required BrowserTimeProvider TimeProvider { get; init; }
 
     [Inject]
-    public required TelemetryRepository TelemetryRepository { get; init; }
+    public required DashboardDataSource DataSource { get; init; }
+
+    public ITelemetryRepository TelemetryRepository => DataSource.TelemetryRepository;
 
     [Inject]
     public required IStringLocalizer<Resources.Dialogs> Loc { get; init; }
@@ -56,6 +61,9 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
 
     [Inject]
     public required ILogger<GenAIVisualizerDialog> Logger { get; init; }
+
+    [Inject]
+    public required IJSRuntime JS { get; init; }
 
     [Inject]
     public required ITelemetryErrorRecorder ErrorRecorder { get; init; }
@@ -83,6 +91,7 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
     {
         if (_content != Content)
         {
+            Interlocked.Increment(ref _contentUpdateVersion);
             _contextSpans = Content.GetContextGenAISpans();
             _currentSpanContextIndex = _contextSpans.FindIndex(s => s.SpanId == Content.Span.SpanId);
             _content = Content;
@@ -97,7 +106,7 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
     private async Task UpdateDialogData()
     {
         // Multiple threads can call this. Run check inside InvokeAsync to avoid concurrency issues.
-        await InvokeAsync(() =>
+        await InvokeAsync(async () =>
         {
             var hasUpdatedTrace = TelemetryRepository.HasUpdatedTrace(Content.Span.Trace);
             var newContextSpans = Content.GetContextGenAISpans();
@@ -112,22 +121,50 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
                 _contextSpans = newContextSpans;
                 _currentSpanContextIndex = _contextSpans.IndexOf(span);
 
-                TryUpdateViewedGenAISpan(span);
+                await TryUpdateViewedGenAISpanAsync(span);
                 StateHasChanged();
             }
         });
     }
 
-    private void OnViewItem(GenAIItemViewModel viewModel)
+    private void ResetToolStates()
+    {
+        foreach (var td in Content.ToolDefinitions)
+        {
+            td.Expanded = false;
+            td.Highlighted = false;
+        }
+    }
+
+    private void OnViewItem(GenAIItemViewModel? viewModel)
     {
         SelectedItem = viewModel;
     }
 
-    private void ViewToolDefinition(ToolDefinitionViewModel toolDefinition)
+    private async Task GoBackAsync()
+    {
+        var previousIndex = SelectedItem?.Index;
+        SelectedItem = null;
+        OverviewActiveView = OverviewViewKind.InputOutput;
+
+        if (previousIndex is { } index)
+        {
+            // Allow the UI to render the overview before scrolling.
+            await Task.Delay(50);
+            await JS.InvokeVoidAsync("scrollToElement", $"genai-message-{index}");
+        }
+    }
+
+    private async Task ViewToolDefinitionAsync(ToolDefinitionViewModel toolDefinition)
     {
         SelectedItem = null;
         OverviewActiveView = OverviewViewKind.Tools;
         toolDefinition.Expanded = true;
+        toolDefinition.Highlighted = true;
+
+        // Allow the UI to render the tools tab before scrolling.
+        await Task.Delay(50);
+        await JS.InvokeVoidAsync("scrollToElement", toolDefinition.ElementId);
     }
 
     private bool TryGetToolCall(string id, [NotNullWhen(true)] out GenAIItemViewModel? itemVM, [NotNullWhen(true)] out ToolCallRequestPart? toolCallRequestPart)
@@ -154,13 +191,17 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
     {
         var selectedIndex = Content.SelectedTreeItem?.Data as int?;
         SelectedItem = Content.Items.FirstOrDefault(m => m.Index == selectedIndex);
+        if (SelectedItem != null)
+        {
+            ResetToolStates();
+        }
         StateHasChanged();
         return Task.CompletedTask;
     }
 
-    private void OnOverviewTabChange(FluentTab newTab)
+    private void OnOverviewTabChange(FluentTab? newTab)
     {
-        var id = newTab.Id?.Substring("tab-overview-".Length);
+        var id = newTab?.Id?.Substring("tab-overview-".Length);
 
         if (id is null
             || !Enum.TryParse(typeof(OverviewViewKind), id, out var o)
@@ -169,12 +210,17 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
             return;
         }
 
+        if (viewKind != OverviewViewKind.Tools)
+        {
+            ResetToolStates();
+        }
+
         OverviewActiveView = viewKind;
     }
 
-    private void OnMessageTabChange(FluentTab newTab)
+    private void OnMessageTabChange(FluentTab? newTab)
     {
-        var id = newTab.Id?.Substring("tab-message-".Length);
+        var id = newTab?.Id?.Substring("tab-message-".Length);
 
         if (id is null
             || !Enum.TryParse(typeof(ItemViewKind), id, out var o)
@@ -186,19 +232,19 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
         MessageActiveView = viewKind;
     }
 
-    private void OnPreviousGenAISpan()
+    private async Task OnPreviousGenAISpan()
     {
         if (TryGetContextSpanByIndex(_currentSpanContextIndex - 1, out var span))
         {
-            TryUpdateViewedGenAISpan(span);
+            await TryUpdateViewedGenAISpanAsync(span);
         }
     }
 
-    private void OnNextGenAISpan()
+    private async Task OnNextGenAISpan()
     {
         if (TryGetContextSpanByIndex(_currentSpanContextIndex + 1, out var span))
         {
-            TryUpdateViewedGenAISpan(span);
+            await TryUpdateViewedGenAISpanAsync(span);
         }
     }
 
@@ -208,12 +254,19 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
         return span != null;
     }
 
-    private bool TryUpdateViewedGenAISpan(OtlpSpan newSpan)
+    private async Task<bool> TryUpdateViewedGenAISpanAsync(OtlpSpan newSpan)
     {
+        var updateVersion = Interlocked.Increment(ref _contentUpdateVersion);
         var selectedIndex = SelectedItem?.Index;
+        var getContextGenAISpans = Content.GetContextGenAISpans;
 
         var spanDetailsViewModel = SpanDetailsViewModel.Create(newSpan, TelemetryRepository, TelemetryRepository.GetResources());
-        var dialogViewModel = GenAIVisualizerDialogViewModel.Create(spanDetailsViewModel, selectedLogEntryId: null, ErrorRecorder, TelemetryRepository, Content.GetContextGenAISpans);
+        var dialogViewModel = await GenAIVisualizerDialogViewModel.CreateAsync(spanDetailsViewModel, selectedLogEntryId: null, ErrorRecorder, TelemetryRepository, getContextGenAISpans, _cts.Token);
+
+        if (updateVersion != Volatile.Read(ref _contentUpdateVersion))
+        {
+            return false;
+        }
 
         if (selectedIndex != null)
         {
@@ -223,20 +276,16 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
         Content = dialogViewModel;
         _currentSpanContextIndex = _contextSpans.IndexOf(newSpan);
 
-        return true;
-    }
-
-    private string GetItemTitle(GenAIItemViewModel e)
-    {
-        return e.Type switch
+        if (OverviewActiveView is OverviewViewKind.Tools && Content.ToolDefinitions.Count == 0)
         {
-            GenAIItemType.SystemMessage => Loc[nameof(Resources.Dialogs.GenAIMessageTitleSystem)],
-            GenAIItemType.UserMessage => Loc[nameof(Resources.Dialogs.GenAIMessageTitleUser)],
-            GenAIItemType.AssistantMessage or GenAIItemType.OutputMessage => Loc[nameof(Resources.Dialogs.GenAIMessageTitleAssistant)],
-            GenAIItemType.ToolMessage => Loc[nameof(Resources.Dialogs.GenAIMessageTitleTool)],
-            GenAIItemType.Error => "Error",
-            _ => string.Empty
-        };
+            OverviewActiveView = OverviewViewKind.InputOutput;
+        }
+        else if (OverviewActiveView is OverviewViewKind.Evaluations && Content.Evaluations.Count == 0)
+        {
+            OverviewActiveView = OverviewViewKind.InputOutput;
+        }
+
+        return true;
     }
 
     private static string GetToolHeadingTooltip(ToolDefinitionViewModel vm)
@@ -253,36 +302,36 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
 
     private static bool TryGetDataPart(GenAIItemPartViewModel itemPart, HashSet<string>? matchingMimeTypes, [NotNullWhen(true)] out DataInfo? dataInfo)
     {
-        switch (itemPart.MessagePart?.Type)
+        switch (itemPart.MessagePart)
         {
-            case "blob":
+            case BlobPart blobPart:
                 {
-                    if (MatchMimeType(itemPart, matchingMimeTypes, out var mimeType))
+                    if (MatchMimeType(blobPart.MimeType, matchingMimeTypes))
                     {
-                        if (itemPart.TryGetPropertyValue("content", out var content))
+                        if (!string.IsNullOrEmpty(blobPart.Content))
                         {
                             dataInfo = new DataInfo(
-                                Url: $"data:{mimeType};base64,{content}",
-                                MimeType: mimeType,
-                                FileName: CalculateFileName(currentFileName: null, mimeType));
+                                Url: $"data:{blobPart.MimeType};base64,{blobPart.Content}",
+                                MimeType: blobPart.MimeType!,
+                                FileName: CalculateFileName(currentFileName: null, blobPart.MimeType!));
                             return true;
                         }
                     }
                     break;
                 }
-            case "uri":
+            case UriPart uriPart:
                 {
-                    if (MatchMimeType(itemPart, matchingMimeTypes, out var mimeType))
+                    if (MatchMimeType(uriPart.MimeType, matchingMimeTypes))
                     {
-                        if (itemPart.TryGetPropertyValue("uri", out var uri))
+                        if (!string.IsNullOrEmpty(uriPart.Uri))
                         {
                             // Only attempt to display image if it is an http/https address.
-                            if (Uri.TryCreate(uri, UriKind.Absolute, out var result) && result.Scheme.ToLowerInvariant() is "http" or "https")
+                            if (Uri.TryCreate(uriPart.Uri, UriKind.Absolute, out var result) && result.Scheme.ToLowerInvariant() is "http" or "https")
                             {
                                 dataInfo = new DataInfo(
-                                    Url: uri,
-                                    MimeType: mimeType,
-                                    FileName: CalculateFileName(Path.GetFileName(result.LocalPath), mimeType));
+                                    Url: uriPart.Uri,
+                                    MimeType: uriPart.MimeType!,
+                                    FileName: CalculateFileName(Path.GetFileName(result.LocalPath), uriPart.MimeType!));
                                 return true;
                             }
                         }
@@ -294,11 +343,11 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
         dataInfo = null;
         return false;
 
-        static bool MatchMimeType(GenAIItemPartViewModel viewModel, HashSet<string>? matchingMimeTypes, [NotNullWhen(true)] out string? mimeType)
+        static bool MatchMimeType(string? mimeType, HashSet<string>? matchingMimeTypes)
         {
-            if (viewModel.TryGetPropertyValue("mime_type", out mimeType))
+            if (!string.IsNullOrEmpty(mimeType))
             {
-                return matchingMimeTypes == null || matchingMimeTypes.Contains(mimeType);
+                return matchingMimeTypes is null || matchingMimeTypes.Contains(mimeType);
             }
 
             return false;
@@ -326,6 +375,9 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
 
     public void Dispose()
     {
+        Interlocked.Increment(ref _contentUpdateVersion);
+        _cts.Cancel();
+        _cts.Dispose();
         _resourcesSubscription?.Dispose();
         _tracesSubscription?.Dispose();
         _logsSubscription?.Dispose();
@@ -334,22 +386,20 @@ public partial class GenAIVisualizerDialog : ComponentBase, IComponentWithTeleme
 
     public static async Task OpenDialogAsync(DashboardDialogService dialogService,
         OtlpSpan span, long? selectedLogEntryId,
-        TelemetryRepository telemetryRepository, ITelemetryErrorRecorder errorRecorder, List<OtlpResource> resources, Func<List<OtlpSpan>> getContextGenAISpans)
+        ITelemetryRepository telemetryRepository, ITelemetryErrorRecorder errorRecorder, List<OtlpResource> resources, Func<List<OtlpSpan>> getContextGenAISpans,
+        CancellationToken cancellationToken)
     {
         var title = span.Name;
-        var width = dialogService.IsDesktop ? "75vw" : "100vw";
         var parameters = new DialogParameters
         {
             Title = title,
-            Width = $"min(1000px, {width})",
-            TrapFocus = true,
+            Width = "min(1000px, 75vw)",
             Modal = true,
-            PreventScroll = true,
         };
 
         var spanDetailsViewModel = SpanDetailsViewModel.Create(span, telemetryRepository, resources);
 
-        var dialogViewModel = GenAIVisualizerDialogViewModel.Create(spanDetailsViewModel, selectedLogEntryId, errorRecorder, telemetryRepository, getContextGenAISpans);
+        var dialogViewModel = await GenAIVisualizerDialogViewModel.CreateAsync(spanDetailsViewModel, selectedLogEntryId, errorRecorder, telemetryRepository, getContextGenAISpans, cancellationToken);
 
         await dialogService.ShowDialogAsync<GenAIVisualizerDialog>(dialogViewModel, parameters);
     }

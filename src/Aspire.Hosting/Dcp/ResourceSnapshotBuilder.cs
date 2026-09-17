@@ -1,9 +1,12 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREEXTENSION001 // Debug support annotations are experimental.
+
 using System.Collections.Immutable;
 using Aspire.Dashboard.Model;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Dashboard;
 using Aspire.Hosting.Dcp.Model;
 
 namespace Aspire.Hosting.Dcp;
@@ -23,6 +26,7 @@ internal class ResourceSnapshotBuilder
         var urls = GetUrls(container, container.Status?.State);
         var volumes = GetVolumes(container);
 
+        var effectiveArgs = container.Status?.EffectiveArgs;
         var environment = GetEnvironmentVariables(container.Status?.EffectiveEnv ?? container.Spec.Env, container.Spec.Env);
         var state = container.Status?.State;
 
@@ -39,7 +43,7 @@ internal class ResourceSnapshotBuilder
             _resourceState.ApplicationModel.TryGetValue(container.AppModelResourceName, out var appModelResource))
         {
             relationships = ApplicationModel.ResourceSnapshotBuilder.BuildRelationships(appModelResource);
-            launchArguments = GetLaunchArgs(container);
+            launchArguments = GetLaunchArgs(container, effectiveArgs);
         }
 
         return previous with
@@ -49,12 +53,12 @@ internal class ResourceSnapshotBuilder
             // Map a container exit code of -1 (unknown) to null
             ExitCode = container.Status?.ExitCode is null or Conventions.UnknownExitCode ? null : container.Status.ExitCode,
             Properties = previous.Properties.SetResourcePropertyRange([
-                new(KnownProperties.Container.Image, container.Spec.Image),
-                new(KnownProperties.Container.Id, containerId),
-                new(KnownProperties.Container.Command, container.Spec.Command),
-                new(KnownProperties.Container.Args, container.Status?.EffectiveArgs ?? []) { IsSensitive = true },
-                new(KnownProperties.Container.Ports, GetPorts()),
-                new(KnownProperties.Container.Lifetime, GetContainerLifetime()),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Image, container.Spec.Image),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Id, containerId),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Command, container.Spec.Command),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Args, effectiveArgs ?? [], isSensitive: true),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Ports, GetPorts()),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Container, KnownProperties.Container.Lifetime, GetContainerLifetime()),
                 new(KnownProperties.Resource.AppArgs, launchArguments?.Args) { IsSensitive = launchArguments?.IsSensitive ?? false },
                 new(KnownProperties.Resource.AppArgsSensitivity, launchArguments?.ArgsAreSensitive) { IsSensitive = launchArguments?.IsSensitive ?? false },
             ]),
@@ -98,7 +102,8 @@ internal class ResourceSnapshotBuilder
 
         var state = executable.AppModelInitialState is "Hidden" ? "Hidden" : executable.Status?.State;
         var environment = GetEnvironmentVariables(executable.Status?.EffectiveEnv, executable.Spec.Env);
-        var launchArguments = GetLaunchArgs(executable);
+        var effectiveArgs = executable.Status?.EffectiveArgs;
+        var launchArguments = GetLaunchArgs(executable, effectiveArgs);
 
         var relationships = ImmutableArray<RelationshipSnapshot>.Empty;
         if (appModelResource != null)
@@ -112,8 +117,8 @@ internal class ResourceSnapshotBuilder
             State = state,
             ExitCode = executable.Status?.ExitCode,
             Properties = previous.Properties.SetResourcePropertyRange([
-                new(KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
-                new(KnownProperties.Executable.Args, executable.Status?.EffectiveArgs ?? []) { IsSensitive = true },
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.Args, effectiveArgs ?? [], isSensitive: true),
                 new(KnownProperties.Resource.AppArgs, launchArguments?.Args) { IsSensitive = launchArguments?.IsSensitive ?? false },
                 new(KnownProperties.Resource.AppArgsSensitivity, launchArguments?.ArgsAreSensitive) { IsSensitive = launchArguments?.IsSensitive ?? false },
             ]),
@@ -139,12 +144,23 @@ internal class ResourceSnapshotBuilder
                 projectPath = projectResource.GetProjectMetadata().ProjectPath;
                 launchProfileName = projectResource.GetEffectiveLaunchProfile()?.Name;
             }
+            else if (appModelResource.TryGetProjectMetadata(out var projectMetadata))
+            {
+                // New-style, annotation-based C# service (DotnetProjectResource)
+                projectPath = projectMetadata.ProjectPath;
+                launchProfileName = appModelResource.GetEffectiveLaunchProfile()?.Name;
+            }
         }
 
         var state = executable.AppModelInitialState is "Hidden" ? "Hidden" : executable.Status?.State;
+        if (executable.Spec.Start is false && IsNotStartedExecutableState(state))
+        {
+            state = KnownResourceStates.NotStarted;
+        }
 
         var urls = GetUrls(executable, executable.Status?.State);
 
+        var effectiveArgs = executable.Status?.EffectiveArgs;
         var environment = GetEnvironmentVariables(executable.Status?.EffectiveEnv, executable.Spec.Env);
 
         var relationships = ImmutableArray<RelationshipSnapshot>.Empty;
@@ -153,7 +169,10 @@ internal class ResourceSnapshotBuilder
             relationships = ApplicationModel.ResourceSnapshotBuilder.BuildRelationships(appModelResource);
         }
 
-        var launchArguments = GetLaunchArgs(executable);
+        var launchArguments = GetLaunchArgs(executable, effectiveArgs);
+        var properties = GetLaunchConfigurationType(appModelResource) is { } launchConfigurationType
+            ? previous.Properties.SetResourceProperty(KnownProperties.Resource.LaunchConfigurationType, launchConfigurationType)
+            : previous.Properties.RemoveResourceProperty(KnownProperties.Resource.LaunchConfigurationType);
 
         if (projectPath is not null)
         {
@@ -162,13 +181,13 @@ internal class ResourceSnapshotBuilder
                 ResourceType = previous.ResourceType ?? KnownResourceTypes.Project,
                 State = state,
                 ExitCode = executable.Status?.ExitCode,
-                Properties = previous.Properties.SetResourcePropertyRange([
-                    new(KnownProperties.Executable.Path, executable.Spec.ExecutablePath),
-                    new(KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
-                    new(KnownProperties.Executable.Args, executable.Status?.EffectiveArgs ?? []) { IsSensitive = true },
-                    new(KnownProperties.Executable.Pid, executable.Status?.ProcessId),
-                    new(KnownProperties.Project.Path, projectPath),
-                    new(KnownProperties.Project.LaunchProfile, launchProfileName),
+                Properties = properties.SetResourcePropertyRange([
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Executable.Path, executable.Spec.ExecutablePath),
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Executable.Args, effectiveArgs ?? [], isSensitive: true),
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Executable.Pid, executable.Status?.ProcessId),
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Project.Path, projectPath),
+                    ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Project, KnownProperties.Project.LaunchProfile, launchProfileName),
                     new(KnownProperties.Resource.AppArgs, launchArguments?.Args) { IsSensitive = launchArguments?.IsSensitive ?? false },
                     new(KnownProperties.Resource.AppArgsSensitivity, launchArguments?.ArgsAreSensitive) { IsSensitive = launchArguments?.IsSensitive ?? false },
                 ]),
@@ -186,11 +205,11 @@ internal class ResourceSnapshotBuilder
             ResourceType = previous.ResourceType ?? KnownResourceTypes.Executable,
             State = state,
             ExitCode = executable.Status?.ExitCode,
-            Properties = previous.Properties.SetResourcePropertyRange([
-                new(KnownProperties.Executable.Path, executable.Spec.ExecutablePath),
-                new(KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
-                new(KnownProperties.Executable.Args, executable.Status?.EffectiveArgs ?? []) { IsSensitive = true },
-                new(KnownProperties.Executable.Pid, executable.Status?.ProcessId),
+            Properties = properties.SetResourcePropertyRange([
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.Path, executable.Spec.ExecutablePath),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.WorkDir, executable.Spec.WorkingDirectory),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.Args, effectiveArgs ?? [], isSensitive: true),
+                ResourcePropertySnapshotMetadata.Create(KnownResourceTypes.Executable, KnownProperties.Executable.Pid, executable.Status?.ProcessId),
                 new(KnownProperties.Resource.AppArgs, launchArguments?.Args) { IsSensitive = launchArguments?.IsSensitive ?? false },
                 new(KnownProperties.Resource.AppArgsSensitivity, launchArguments?.ArgsAreSensitive) { IsSensitive = launchArguments?.IsSensitive ?? false },
             ]),
@@ -203,7 +222,27 @@ internal class ResourceSnapshotBuilder
         };
     }
 
-    private static (ImmutableArray<string> Args, ImmutableArray<int>? ArgsAreSensitive, bool IsSensitive)? GetLaunchArgs(CustomResource resource)
+    private static string? GetLaunchConfigurationType(IResource? resource)
+    {
+        // The annotation identifies the debugger even when the current IDE lacks it. Structural exclusions
+        // cannot be fixed by installing an extension, so do not advertise those resources as debuggable.
+        if (resource is not null
+            && resource.TryGetLastAnnotation<SupportsDebuggingAnnotation>(out var annotation)
+            && !resource.HasAnnotationOfType<ForceProcessExecutionAnnotation>()
+            && !resource.HasPersistentLifetime())
+        {
+            return annotation.LaunchConfigurationType;
+        }
+
+        return null;
+    }
+
+    private static bool IsNotStartedExecutableState(string? state)
+    {
+        return string.IsNullOrEmpty(state) || state == ExecutableState.Unknown;
+    }
+
+    private static (ImmutableArray<string> Args, ImmutableArray<int>? ArgsAreSensitive, bool IsSensitive)? GetLaunchArgs(CustomResource resource, IReadOnlyList<string>? effectiveArgs)
     {
         if (!resource.TryGetAnnotationAsObjectList(CustomResource.ResourceAppArgsAnnotation, out List<AppLaunchArgumentAnnotation>? launchArgumentAnnotations))
         {
@@ -221,11 +260,23 @@ internal class ResourceSnapshotBuilder
                 anySensitive = true;
             }
 
-            launchArgsBuilder.Add(annotation.Argument);
+            launchArgsBuilder.Add(GetArgumentValue(annotation, effectiveArgs));
             argsAreSensitiveBuilder.Add(Convert.ToInt32(annotation.IsSensitive));
         }
 
         return (launchArgsBuilder.ToImmutable(), argsAreSensitiveBuilder.ToImmutable(), anySensitive);
+
+        static string GetArgumentValue(AppLaunchArgumentAnnotation annotation, IReadOnlyList<string>? effectiveArgs)
+        {
+            if (annotation.EffectiveArgumentIndex is int index &&
+                effectiveArgs is not null &&
+                (uint)index < (uint)effectiveArgs.Count)
+            {
+                return effectiveArgs[index];
+            }
+
+            return annotation.Argument;
+        }
     }
 
     private ImmutableArray<UrlSnapshot> GetUrls(CustomResource resource, string? resourceState)
@@ -276,7 +327,9 @@ internal class ResourceSnapshotBuilder
                             endpointUrl.IsInternal)
                         {
                             IsInactive = isInactive,
+#pragma warning disable CS0618 // DisplayOrder is obsolete but must still be flowed for compatibility.
                             DisplayProperties = new(endpointUrl.DisplayText ?? "", endpointUrl.DisplayOrder ?? 0)
+#pragma warning restore CS0618
                         });
                     processedEndpointUrls.Add(endpointUrl);
                 }
@@ -302,7 +355,9 @@ internal class ResourceSnapshotBuilder
                     new(Name: endpointName, Url: endpointUrl.Url, IsInternal: endpointUrl.IsInternal)
                     {
                         IsInactive = !isActive,
+#pragma warning disable CS0618 // DisplayOrder is obsolete but must still be flowed for compatibility.
                         DisplayProperties = new(endpointUrl.DisplayText ?? "", endpointUrl.DisplayOrder ?? 0)
+#pragma warning restore CS0618
                     });
             }
 
@@ -313,7 +368,9 @@ internal class ResourceSnapshotBuilder
                     new(Name: null, Url: url.Url, IsInternal: url.IsInternal)
                     {
                         IsInactive = !resourceRunning,
+#pragma warning disable CS0618 // DisplayOrder is obsolete but must still be flowed for compatibility.
                         DisplayProperties = new(url.DisplayText ?? "", url.DisplayOrder ?? 0)
+#pragma warning restore CS0618
                     });
             }
         }

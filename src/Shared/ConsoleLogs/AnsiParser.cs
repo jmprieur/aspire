@@ -5,7 +5,11 @@ using System.Text;
 
 namespace Aspire.Shared.ConsoleLogs;
 
+#if ASPIRE_DASHBOARD
 public class AnsiParser
+#else
+internal sealed class AnsiParser
+#endif
 {
     private const char EscapeChar = '\x1B';
     private const char ParametersSeparatorChar = ';';

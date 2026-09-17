@@ -46,8 +46,7 @@ internal static class X509Certificate2Extensions
         ArgumentNullException.ThrowIfNull(certificate);
 
         var byteArray = certificate.Extensions.OfType<X509Extension>()
-            .Where(e => string.Equals(AspNetHttpsOid, e.Oid?.Value, StringComparison.Ordinal))
-            .Single()
+            .Single(e => string.Equals(AspNetHttpsOid, e.Oid?.Value, StringComparison.Ordinal))
             .RawData;
 
         if ((byteArray.Length == AspNetHttpsOidFriendlyName.Length && byteArray[0] == (byte)'A') || byteArray.Length == 0)
@@ -116,5 +115,83 @@ internal static class X509Certificate2Extensions
         ArgumentNullException.ThrowIfNull(certificate);
 
         return certificate.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any(ski => !string.IsNullOrEmpty(ski.SubjectKeyIdentifier));
+    }
+
+    /// <summary>
+    /// Orders certificates by version descending, then by expiration date descending,
+    /// matching the ordering logic ASP.NET Core uses.
+    /// </summary>
+    /// <param name="certificates">The certificates to order.</param>
+    /// <returns>The certificates ordered by version descending, then by expiration date descending.</returns>
+    public static IOrderedEnumerable<X509Certificate2> OrderByVersion(this IEnumerable<X509Certificate2> certificates)
+    {
+        return certificates
+            .OrderByDescending(c => c.GetCertificateVersion())
+            .ThenByDescending(c => c.NotAfter);
+    }
+
+    /// <summary>
+    /// Gets the certificates trusted by the current user's platform trust store.
+    /// </summary>
+    /// <param name="certificates">The certificates to check.</param>
+    /// <param name="cancellationToken">A token that can be used to cancel the operation.</param>
+    /// <returns>The trusted certificates in their original order.</returns>
+    public static List<X509Certificate2> GetTrustedCertificates(
+        this IEnumerable<X509Certificate2> certificates,
+        CancellationToken cancellationToken = default)
+    {
+        using var chain = new X509Chain();
+        // Revocation does not apply to self-signed development certificates.
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+
+        X509Certificate2Collection? rootCertificates = null;
+        if (OperatingSystem.IsWindows())
+        {
+            // On Windows, chain.Build() can succeed even when the certificate is not in the trusted root store.
+            using var rootStore = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+            rootStore.Open(OpenFlags.ReadOnly);
+            rootCertificates = rootStore.Certificates;
+        }
+
+        try
+        {
+            var trustedCertificates = new List<X509Certificate2>();
+            foreach (var certificate in certificates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    if (!chain.Build(certificate))
+                    {
+                        continue;
+                    }
+
+                    if (rootCertificates is not null &&
+                        !rootCertificates.Any(rootCertificate => rootCertificate.RawDataMemory.Span.SequenceEqual(certificate.RawDataMemory.Span)))
+                    {
+                        continue;
+                    }
+
+                    trustedCertificates.Add(certificate);
+                }
+                finally
+                {
+                    chain.Reset();
+                }
+            }
+
+            return trustedCertificates;
+        }
+        finally
+        {
+            if (rootCertificates is not null)
+            {
+                foreach (var rootCertificate in rootCertificates)
+                {
+                    rootCertificate.Dispose();
+                }
+            }
+        }
     }
 }

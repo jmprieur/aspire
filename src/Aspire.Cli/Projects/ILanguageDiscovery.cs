@@ -35,8 +35,21 @@ internal readonly record struct LanguageId(string Value)
 /// <param name="PackageName">The NuGet package name for language support (e.g., "Aspire.Hosting.CodeGeneration.TypeScript").</param>
 /// <param name="DetectionPatterns">File patterns used to detect this language (e.g., ["apphost.ts"]).</param>
 /// <param name="CodeGenerator">The code generator name to use for this language (e.g., "TypeScript"). Must match ICodeGenerator.Language.</param>
-/// <param name="AppHostFileName">The default filename for the AppHost entry point (e.g., "apphost.ts").</param>
+/// <param name="AppHostFileName">The default filename for the AppHost entry point (e.g., "apphost.mts").</param>
 /// <param name="IsExperimental">Whether this language is experimental and requires an additional per-language feature flag to be enabled.</param>
+/// <param name="PreserveUnchangedGeneratedFiles">
+/// Whether regenerating identical content may leave the existing file, and therefore its last-write
+/// time, untouched. Only safe for languages whose toolchain reads the generated sources in place and
+/// decides what to rebuild from their timestamps, which is what makes skipping the rewrite the point:
+/// Java compiles <c>.aspire/modules</c> directly, so rewriting unchanged files forces javac to
+/// recompile the whole generated SDK on every launch.
+/// <para>
+/// It must stay <see langword="false" /> for languages that install the generated sources into an
+/// environment before running them. Python builds <c>.aspire/modules</c> into the virtual environment
+/// through uv, which decides whether to reuse its cached build from the source timestamps, so an
+/// unchanged file silently keeps a stale install rather than picking the regenerated SDK up.
+/// </para>
+/// </param>
 internal sealed record LanguageInfo(
     LanguageId LanguageId,
     string DisplayName,
@@ -44,7 +57,67 @@ internal sealed record LanguageInfo(
     string[] DetectionPatterns,
     string CodeGenerator,
     string? AppHostFileName = null,
-    bool IsExperimental = false);
+    bool IsExperimental = false,
+    bool PreserveUnchangedGeneratedFiles = false)
+{
+    /// <summary>
+    /// The default folder path where generated code is placed for guest languages.
+    /// </summary>
+    internal static string GeneratedFolderName { get; } = Path.Combine(".aspire", "modules");
+
+    /// <summary>
+    /// The legacy folder path where generated code was placed prior to consolidating
+    /// generated artifacts under <c>.aspire/</c>. Used by the legacy TypeScript
+    /// <c>apphost.ts</c> compatibility path which still imports from <c>./.modules/</c>.
+    /// </summary>
+    internal const string LegacyGeneratedFolderName = ".modules";
+
+    /// <summary>
+    /// Maximum directory depth used when scanning the file system for language
+    /// detection patterns. Keeps the scan fast in large workspaces while still
+    /// finding AppHost files in typical nested project layouts.
+    /// </summary>
+    internal const int DetectionRecurseLimit = 5;
+
+    /// <summary>
+    /// Returns whether <paramref name="fileName"/> matches any of this
+    /// language's <see cref="DetectionPatterns"/>. Supports exact names
+    /// (e.g. <c>apphost.ts</c>) and wildcard extensions (e.g. <c>*.csproj</c>).
+    /// </summary>
+    internal bool MatchesFile(string fileName)
+    {
+        return DetectionPatterns.Any(p => MatchesPattern(fileName, p));
+    }
+
+    /// <summary>
+    /// Scans <paramref name="directory"/> (up to <see cref="DetectionRecurseLimit"/>
+    /// levels deep) for any file matching this language's detection patterns.
+    /// Uses <see cref="Utils.FileSystemHelper.FindFirstFile"/> so that glob
+    /// patterns like <c>*.csproj</c> are expanded correctly — unlike a plain
+    /// <see cref="File.Exists"/> call.
+    /// </summary>
+    /// <returns>The full path of the first matching file, or <c>null</c>.</returns>
+    internal string? FindInDirectory(string directory)
+    {
+        return Utils.FileSystemHelper.FindFirstFile(directory, DetectionRecurseLimit, DetectionPatterns);
+    }
+
+    /// <summary>
+    /// Checks whether <paramref name="fileName"/> matches a single detection
+    /// pattern. Handles wildcard extension patterns (<c>*.csproj</c>) and
+    /// exact file names (<c>apphost.ts</c>).
+    /// </summary>
+    internal static bool MatchesPattern(string fileName, string pattern)
+    {
+        if (pattern.StartsWith("*.", StringComparison.Ordinal))
+        {
+            var extension = pattern[1..]; // ".csproj"
+            return fileName.EndsWith(extension, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return fileName.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+}
 
 /// <summary>
 /// Interface for discovering available languages.
@@ -72,13 +145,24 @@ internal interface ILanguageDiscovery
     Task<string?> GetPackageForLanguageAsync(LanguageId languageId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Detects the language used in a directory by checking for known file patterns.
-    /// This is a fallback detection mechanism when .aspire/settings.json doesn't exist.
+    /// Detects the language used in a directory by checking for known file patterns
+    /// in the immediate directory only. Does not recurse into subdirectories.
     /// </summary>
     /// <param name="directory">The directory to check.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The detected language ID, or null if no language was detected.</returns>
     Task<LanguageId?> DetectLanguageAsync(DirectoryInfo directory, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Detects the language used in a directory by recursively scanning for known
+    /// file patterns up to <see cref="LanguageInfo.DetectionRecurseLimit"/> levels
+    /// deep. Use this when a broader search is needed (e.g. <c>aspire doctor</c>),
+    /// but be aware it is more expensive than <see cref="DetectLanguageAsync"/>.
+    /// </summary>
+    /// <param name="directory">The root directory to scan.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The detected language ID, or null if no language was detected.</returns>
+    Task<LanguageId?> DetectLanguageRecursiveAsync(DirectoryInfo directory, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets language information by its identifier.

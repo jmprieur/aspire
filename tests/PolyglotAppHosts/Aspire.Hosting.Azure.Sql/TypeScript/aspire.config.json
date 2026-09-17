@@ -1,0 +1,11 @@
+{
+  "appHost": {
+    "path": "apphost.mts",
+    "language": "typescript/nodejs"
+  },
+  "packages": {
+    "Aspire.Hosting.Azure.Sql": "",
+    "Aspire.Hosting.Azure.Provisioning.Sql": "",
+    "Aspire.Hosting.Azure.Storage": ""
+  }
+}

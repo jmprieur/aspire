@@ -8,11 +8,43 @@
       },
       "applicationUrl": "https://localhost:15888"
     },
+    "https (browser only + telemetry)": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+        "Dashboard__TelemetryLimits__MaxLogCount": "2147483647",
+        "Dashboard__TelemetryLimits__MaxTraceCount": "2147483647",
+        "Dashboard__TelemetryLimits__MaxMetricsCount": "2147483647",
+        "Dashboard__TelemetryLimits__MaxAttributeCount": "2147483647",
+        "Dashboard__TelemetryLimits__MaxAttributeLength": "2147483647",
+        "Dashboard__TelemetryLimits__MaxSpanEventCount": "2147483647",
+        "Dashboard__TelemetryLimits__MaxResourceCount": "2147483647"
+      },
+      "applicationUrl": "https://localhost:15888"
+    },
     "http (browser only)": {
       "commandName": "Project",
       "launchBrowser": true,
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:4317",
+        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:4318"
+      },
+      "applicationUrl": "http://localhost:15889"
+    },
+    "http (browser + api)": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:4317",
+        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "http://localhost:4318",
+        "ASPIRE_DASHBOARD_API_ENABLED": "true",
+        "DASHBOARD__API__PRIMARYAPIKEY": "12345678",
+        "DASHBOARD__API__AUTHMODE": "ApiKey"
       },
       "applicationUrl": "http://localhost:15889"
     }

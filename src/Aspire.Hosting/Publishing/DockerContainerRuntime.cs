@@ -6,54 +6,69 @@
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dcp.Process;
+using Aspire.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Aspire.Hosting.Publishing;
 
 internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContainerRuntime>
 {
-    public DockerContainerRuntime(ILogger<DockerContainerRuntime> logger) : base(logger)
+    private const string LocalImageOciArchiveNotSupportedMessage =
+        "Docker cannot export an OCI archive when container-file layering references locally built images. " +
+        "Use ContainerImageFormat.Docker for this archive or run the publish with Podman.";
+    private readonly ILogger<DockerContainerRuntime> _logger;
+
+    public DockerContainerRuntime(ILogger<DockerContainerRuntime> logger, IProcessRunner processRunner) : base(logger, processRunner)
     {
+        _logger = logger;
     }
 
-    protected override string RuntimeExecutable => "docker";
+    protected override string RuntimeExecutable => KnownContainerRuntimes.Docker;
     public override string Name => "Docker";
-    private async Task<int> RunDockerBuildAsync(string contextPath, string dockerfilePath, ContainerImageBuildOptions? options, Dictionary<string, string?> buildArguments, Dictionary<string, BuildImageSecretValue> buildSecrets, string? stage, CancellationToken cancellationToken)
+    private async Task RunDockerBuildAsync(string contextPath, string dockerfilePath, ContainerImageBuildOptions? options, Dictionary<string, string?> buildArguments, Dictionary<string, BuildImageSecretValue> buildSecrets, string? stage, CancellationToken cancellationToken)
     {
         var imageName = !string.IsNullOrEmpty(options?.Tag)
             ? $"{options.ImageName}:{options.Tag}"
             : options?.ImageName ?? throw new ArgumentException("ImageName must be provided in options.", nameof(options));
 
-        string? builderName = null;
-        var resourceName = imageName.Replace('/', '-').Replace(':', '-');
+        string? selectedBuilderName = null;
+        string? isolatedBuilderName = null;
+        var exportsArchive = !string.IsNullOrEmpty(options?.OutputPath);
+        var requiresLocalImageStore = options?.RequiresLocalImageStore == true;
+        var exportsLocalImageArchive = exportsArchive && requiresLocalImageStore;
 
-        // Docker requires a custom buildkit instance for the image when
-        // targeting the OCI format so we construct it and remove it here.
         if (options?.ImageFormat == ContainerImageFormat.Oci)
         {
-            if (string.IsNullOrEmpty(options?.OutputPath))
+            if (!exportsArchive)
             {
                 throw new ArgumentException("OutputPath must be provided when ImageFormat is Oci.", nameof(options));
             }
+        }
 
-            builderName = $"{resourceName}-builder";
-            var createBuilderResult = await CreateBuildkitInstanceAsync(builderName, cancellationToken).ConfigureAwait(false);
-
-            if (createBuilderResult != 0)
-            {
-                Logger.LogError("Failed to create buildkit instance {BuilderName} with exit code {ExitCode}.", builderName, createBuilderResult);
-                return createBuilderResult;
-            }
+        if (requiresLocalImageStore)
+        {
+            // Container-file layering refers to images tagged only in the active daemon's image store.
+            // A Docker context name selects that context's daemon-backed Buildx builder, avoiding an
+            // ambient custom builder that cannot resolve the local-only image.
+            selectedBuilderName = await GetActiveDockerContextAsync(imageName, cancellationToken).ConfigureAwait(false);
+        }
+        else if (exportsArchive)
+        {
+            // Docker's in-daemon builder cannot reliably write Docker or OCI archive exporters.
+            // Use an isolated BuildKit container for archive output and remove it after the build.
+            // https://docs.docker.com/build/exporters/
+            isolatedBuilderName = $"aspire-{Guid.NewGuid():N}";
+            await CreateBuildkitInstanceAsync(isolatedBuilderName, cancellationToken).ConfigureAwait(false);
+            selectedBuilderName = isolatedBuilderName;
         }
 
         try
         {
             var arguments = $"buildx build --file \"{dockerfilePath}\" --tag \"{imageName}\"";
 
-            // Use the specific builder for OCI builds
-            if (!string.IsNullOrEmpty(builderName))
+            if (!string.IsNullOrEmpty(selectedBuilderName))
             {
-                arguments += $" --builder \"{builderName}\"";
+                arguments += $" --builder \"{selectedBuilderName}\"";
             }
 
             // Add platform support if specified
@@ -63,7 +78,8 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
             }
 
             // Add output format support if specified
-            if (options?.ImageFormat is not null || !string.IsNullOrEmpty(options?.OutputPath))
+            if (!exportsLocalImageArchive &&
+                (options?.ImageFormat is not null || !string.IsNullOrEmpty(options?.OutputPath)))
             {
                 var outputType = options?.ImageFormat switch
                 {
@@ -75,7 +91,7 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
 
                 if (!string.IsNullOrEmpty(options?.OutputPath))
                 {
-                    var archivePath = ResourceExtensions.GetContainerImageArchivePath(options.OutputPath, resourceName, imageTag: null);
+                    var archivePath = ResourceExtensions.GetContainerImageArchivePath(options.OutputPath, imageName);
                     outputType += $",dest={archivePath}";
                 }
 
@@ -93,65 +109,79 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
 
             arguments += $" \"{contextPath}\"";
 
-            var spec = new ProcessSpec("docker")
-            {
-                Arguments = arguments,
-                OnOutputData = output =>
-                {
-                    Logger.LogDebug("docker buildx (stdout): {Output}", output);
-                },
-                OnErrorData = error =>
-                {
-                    Logger.LogDebug("docker buildx (stderr): {Error}", error);
-                },
-                ThrowOnNonZeroReturnCode = false,
-                InheritEnv = true,
-            };
-
-            // Add build secrets as environment variables (only for environment-type secrets)
+            // Prepare environment variables for build secrets
+            var environmentVariables = new Dictionary<string, string>();
             foreach (var buildSecret in buildSecrets)
             {
                 if (buildSecret.Value.Type == BuildImageSecretType.Environment && buildSecret.Value.Value is not null)
                 {
-                    spec.EnvironmentVariables[buildSecret.Key.ToUpperInvariant()] = buildSecret.Value.Value;
+                    environmentVariables[buildSecret.Key.ToUpperInvariant()] = buildSecret.Value.Value;
                 }
             }
 
-            Logger.LogDebug("Running Docker CLI with arguments: {ArgumentList}", spec.Arguments);
-            var (pendingProcessResult, processDisposable) = ProcessUtil.Run(spec);
+            var processResult = await ExecuteContainerCommandWithResultAsync(
+                arguments,
+                "Docker build for {ImageName} failed with exit code {ExitCode}.",
+                "Docker build for {ImageName} succeeded.",
+                cancellationToken,
+                new object[] { imageName },
+                environmentVariables,
+                retainOutput: true).ConfigureAwait(false);
 
-            await using (processDisposable)
+            if (processResult.ExitCode != 0)
             {
-                var processResult = await pendingProcessResult
-                    .WaitAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                throw new ProcessFailedException(
+                    $"Docker build failed with exit code {processResult.ExitCode}.",
+                    processResult.ExitCode,
+                    processResult.ProcessOutput,
+                    processResult.TotalProcessOutputLineCount);
+            }
 
-                if (processResult.ExitCode != 0)
-                {
-                    Logger.LogError("docker buildx for {ImageName} failed with exit code {ExitCode}.", imageName, processResult.ExitCode);
-                    return processResult.ExitCode;
-                }
-
-                Logger.LogInformation("docker buildx for {ImageName} succeeded.", imageName);
-                return processResult.ExitCode;
+            if (exportsLocalImageArchive)
+            {
+                await RunDockerSaveAsync(imageName, options!, cancellationToken).ConfigureAwait(false);
             }
         }
         finally
         {
-            // Clean up the buildkit instance if we created one
-            if (!string.IsNullOrEmpty(builderName))
+            if (!string.IsNullOrEmpty(isolatedBuilderName))
             {
-                await RemoveBuildkitInstanceAsync(builderName, cancellationToken).ConfigureAwait(false);
+                await RemoveBuildkitInstanceBestEffortAsync(isolatedBuilderName).ConfigureAwait(false);
             }
         }
     }
 
     public override async Task BuildImageAsync(string contextPath, string dockerfilePath, ContainerImageBuildOptions? options, Dictionary<string, string?> buildArguments, Dictionary<string, BuildImageSecretValue> buildSecrets, string? stage, CancellationToken cancellationToken)
     {
+        if (options?.RequiresLocalImageStore == true &&
+            !string.IsNullOrEmpty(options.OutputPath))
+        {
+            switch (options.ImageFormat)
+            {
+                case ContainerImageFormat.Oci:
+                    throw new DistributedApplicationException(LocalImageOciArchiveNotSupportedMessage);
+                case ContainerImageFormat.Docker:
+                case null:
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(options),
+                        options.ImageFormat,
+                        "Invalid container image format");
+            }
+        }
+
+        // Verify buildx is available before attempting a Dockerfile build
+        if (!await CheckDockerBuildxAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new DistributedApplicationException(
+                "Docker buildx is not available. Install the buildx plugin and try again.");
+        }
+
         // Normalize the context path to handle trailing slashes and relative paths
         var normalizedContextPath = Path.GetFullPath(contextPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-        var exitCode = await RunDockerBuildAsync(
+        await RunDockerBuildAsync(
             normalizedContextPath,
             dockerfilePath,
             options,
@@ -159,23 +189,71 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
             buildSecrets,
             stage,
             cancellationToken).ConfigureAwait(false);
+    }
 
-        if (exitCode != 0)
+    private async Task<string> GetActiveDockerContextAsync(string imageName, CancellationToken cancellationToken)
+    {
+        var output = await ExecuteContainerCommandForOutputAsync(
+            "context show",
+            "context discovery",
+            imageName,
+            cancellationToken).ConfigureAwait(false);
+
+        // `docker context show` emits exactly one context name, for example:
+        //   desktop-linux
+        var contextNames = output.Split(
+            Environment.NewLine,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (contextNames is not [var contextName])
         {
-            throw new DistributedApplicationException($"Docker build failed with exit code {exitCode}.");
+            throw new DistributedApplicationException("Docker did not report exactly one active context.");
         }
+
+        return contextName;
+    }
+
+    private async Task RunDockerSaveAsync(
+        string imageName,
+        ContainerImageBuildOptions options,
+        CancellationToken cancellationToken)
+    {
+        var arguments = BuildSaveArguments(imageName, options);
+        var processResult = await ExecuteContainerCommandWithResultAsync(
+            arguments,
+            "Docker image save for {ImageName} failed with exit code {ExitCode}.",
+            "Docker image save for {ImageName} succeeded.",
+            cancellationToken,
+            new object[] { imageName },
+            retainOutput: true).ConfigureAwait(false);
+
+        if (processResult.ExitCode != 0)
+        {
+            throw new ProcessFailedException(
+                $"Docker image save failed with exit code {processResult.ExitCode}.",
+                processResult.ExitCode,
+                processResult.ProcessOutput,
+                processResult.TotalProcessOutputLineCount);
+        }
+    }
+
+    /// <summary>
+    /// Builds the arguments that save a locally built image as a Docker archive.
+    /// </summary>
+    internal static string BuildSaveArguments(string imageName, ContainerImageBuildOptions options)
+    {
+        var outputPath = options.OutputPath;
+        ArgumentException.ThrowIfNullOrEmpty(outputPath);
+        var archivePath = ResourceExtensions.GetContainerImageArchivePath(outputPath, imageName);
+
+        // Layered archives use a private tag whose platforms were already selected by the build.
+        // Save all its variants without requiring API 1.48+ (1.52+ for multiple platforms) for filtering.
+        // https://docs.docker.com/reference/cli/docker/image/save/#platform
+        return $"image save --output \"{archivePath}\" \"{imageName}\"";
     }
 
     public override async Task<bool> CheckIfRunningAsync(CancellationToken cancellationToken)
     {
-        // First check if Docker daemon is running using the same check that DCP uses
-        if (!await CheckDockerDaemonAsync(cancellationToken).ConfigureAwait(false))
-        {
-            return false;
-        }
-
-        // Then check if Docker buildx is available
-        return await CheckDockerBuildxAsync(cancellationToken).ConfigureAwait(false);
+        return await CheckDockerDaemonAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<bool> CheckDockerDaemonAsync(CancellationToken cancellationToken)
@@ -188,7 +266,7 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
                 "Docker daemon is running.",
                 cancellationToken,
                 Array.Empty<object>()).ConfigureAwait(false);
-            
+
             return exitCode == 0;
         }
         catch
@@ -204,10 +282,10 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
             var exitCode = await ExecuteContainerCommandWithExitCodeAsync(
                 "buildx version",
                 "Docker buildx version failed with exit code {ExitCode}.",
-                "Docker buildx is available and running.",
+                "Docker buildx is available.",
                 cancellationToken,
                 Array.Empty<object>()).ConfigureAwait(false);
-            
+
             return exitCode == 0;
         }
         catch
@@ -216,16 +294,25 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
         }
     }
 
-    private async Task<int> CreateBuildkitInstanceAsync(string builderName, CancellationToken cancellationToken)
+    private async Task CreateBuildkitInstanceAsync(string builderName, CancellationToken cancellationToken)
     {
         var arguments = $"buildx create --name \"{builderName}\" --driver docker-container";
-
-        return await ExecuteContainerCommandWithExitCodeAsync(
+        var processResult = await ExecuteContainerCommandWithResultAsync(
             arguments,
             "Failed to create buildkit instance {BuilderName} with exit code {ExitCode}.",
             "Successfully created buildkit instance {BuilderName}.",
             cancellationToken,
-            new object[] { builderName }).ConfigureAwait(false);
+            new object[] { builderName },
+            retainOutput: true).ConfigureAwait(false);
+
+        if (processResult.ExitCode != 0)
+        {
+            throw new ProcessFailedException(
+                $"Failed to create buildkit instance '{builderName}' with exit code {processResult.ExitCode}.",
+                processResult.ExitCode,
+                processResult.ProcessOutput,
+                processResult.TotalProcessOutputLineCount);
+        }
     }
 
     private async Task<int> RemoveBuildkitInstanceAsync(string builderName, CancellationToken cancellationToken)
@@ -238,5 +325,20 @@ internal sealed class DockerContainerRuntime : ContainerRuntimeBase<DockerContai
             "Successfully removed buildkit instance {BuilderName}.",
             cancellationToken,
             new object[] { builderName }).ConfigureAwait(false);
+    }
+
+    private async Task RemoveBuildkitInstanceBestEffortAsync(string builderName)
+    {
+        // Cleanup must outlive a canceled publish, but it is bounded so an unresponsive Docker
+        // daemon cannot delay cancellation indefinitely.
+        using var cleanupCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await RemoveBuildkitInstanceAsync(builderName, cleanupCancellation.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to remove buildkit instance {BuilderName}", builderName);
+        }
     }
 }

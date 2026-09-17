@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Aspire.Cli.EndToEnd.Tests.Helpers;
-using Aspire.Cli.Tests.Utils;
 using Hex1b.Automation;
 using Xunit;
 
@@ -14,80 +13,115 @@ namespace Aspire.Cli.EndToEnd.Tests;
 /// </summary>
 public sealed class EmptyAppHostTemplateTests(ITestOutputHelper output)
 {
+    [CaptureWorkspaceOnFailure]
     [Fact]
-    public async Task CreateEmptyAppHostProject()
+    public async Task CreateAndRunEmptyAppHostProject()
     {
+        var repoRoot = CliE2ETestHelpers.GetRepoRoot();
+        var strategy = CliInstallStrategy.Detect(output.WriteLine);
         var workspace = TemporaryWorkspace.Create(output);
 
-        var prNumber = CliE2ETestHelpers.GetRequiredPrNumber();
-        var commitSha = CliE2ETestHelpers.GetRequiredCommitSha();
-        var isCI = CliE2ETestHelpers.IsRunningInCI;
-        using var terminal = CliE2ETestHelpers.CreateTestTerminal();
+        using var terminal = CliE2ETestHelpers.CreateDockerTestTerminal(repoRoot, strategy, output, mountDockerSocket: true, workspace: workspace);
 
-        var pendingRun = terminal.RunAsync(TestContext.Current.CancellationToken);
-
-        // Pattern for template selection - we need to find and select "Empty AppHost"
-        var waitingForTemplateSelectionPrompt = new CellPatternSearcher()
-            .FindPattern("> Starter App");
-
-        // Wait for the Empty AppHost template to be highlighted (after pressing Down 3 times)
-        var waitingForEmptyAppHostTemplateSelected = new CellPatternSearcher()
-            .Find("> Empty AppHost");
-
-        var waitingForProjectNamePrompt = new CellPatternSearcher()
-            .Find($"Enter the project name ({workspace.WorkspaceRoot.Name}): ");
-
-        var waitingForOutputPathPrompt = new CellPatternSearcher()
-            .Find($"Enter the output path: (./AspireEmptyApp): ");
-
-        var waitingForUrlsPrompt = new CellPatternSearcher()
-            .Find($"Use *.dev.localhost URLs");
-
-        // The purpose of this is to keep track of the number of actual shell commands we have
-        // executed. This is important because we customize the shell prompt to show either
-        // "[n OK] $ " or "[n ERR:exitcode] $ ". This allows us to deterministically wait for a
-        // command to complete and for the shell to be ready for more input rather than relying
-        // on arbitrary timeouts of mid-command strings.
         var counter = new SequenceCounter();
-        var sequenceBuilder = new Hex1bTerminalInputSequenceBuilder();
+        var auto = new Hex1bTerminalAutomator(terminal, defaultTimeout: TimeSpan.FromSeconds(500));
+        await using var terminalRun = CliE2ETestHelpers.StartRun(terminal, workspace, auto, counter, output, TestContext.Current.CancellationToken);
 
-        sequenceBuilder.PrepareEnvironment(workspace, counter);
+        await auto.PrepareDockerEnvironmentAsync(counter, workspace);
+        await auto.InstallAspireCliAsync(strategy, counter);
 
-        if (isCI)
-        {
-            sequenceBuilder.InstallAspireCliFromPullRequest(prNumber, counter);
-            sequenceBuilder.SourceAspireCliEnvironment(counter);
-            sequenceBuilder.VerifyAspireCliVersion(commitSha, counter);
-        }
+        await auto.AspireNewAsync("AspireEmptyApp", counter, template: AspireTemplate.EmptyAppHost);
 
-        sequenceBuilder.Type("aspire new")
-            .Enter()
-            .WaitUntil(s => waitingForTemplateSelectionPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(30))
-            // Navigate down to "Empty AppHost" which is the 5th option
-            .Key(Hex1b.Input.Hex1bKey.DownArrow)
-            .Key(Hex1b.Input.Hex1bKey.DownArrow)
-            .Key(Hex1b.Input.Hex1bKey.DownArrow)
-            .Key(Hex1b.Input.Hex1bKey.DownArrow)
-            .WaitUntil(s => waitingForEmptyAppHostTemplateSelected.Search(s).Count > 0, TimeSpan.FromSeconds(5))
-            .Enter() // select "Empty AppHost"
-            .Enter() // select C#
-            .WaitUntil(s => waitingForProjectNamePrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-            .Type("AspireEmptyApp")
-            .Enter()
-            .WaitUntil(s => waitingForOutputPathPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-            .Enter() // accept default output path
-            .WaitUntil(s => waitingForUrlsPrompt.Search(s).Count > 0, TimeSpan.FromSeconds(10))
-            .Enter() // select "No" for localhost URLs (default)
-            // Empty AppHost template doesn't have Redis or test project prompts
-            .WaitForSuccessPrompt(counter)
-            // Note: We don't run 'aspire run' for Empty AppHost since there's nothing to run
-            .Type("exit")
-            .Enter();
+        // Start the empty AppHost to verify the scaffolded project works
+        await auto.TypeAsync("cd AspireEmptyApp");
+        await auto.EnterAsync();
+        await auto.WaitForSuccessPromptAsync(counter);
 
-        var sequence = sequenceBuilder.Build();
+        await auto.AspireStartAsync(counter);
+        await auto.AspireStopAsync(counter);
+    }
 
-        await sequence.ApplyAsync(terminal, TestContext.Current.CancellationToken);
+    [CaptureWorkspaceOnFailure]
+    [Fact]
+    public async Task CreateDotNetTemplateWithSourceOverrideDoesNotContactOtherSources()
+    {
+        var repoRoot = CliE2ETestHelpers.GetRepoRoot();
+        var strategy = CliInstallStrategy.Detect(output.WriteLine);
+        var workspace = TemporaryWorkspace.Create(output);
 
-        await pendingRun;
+        using var terminal = CliE2ETestHelpers.CreateDockerTestTerminal(repoRoot, strategy, output, workspace: workspace);
+
+        var counter = new SequenceCounter();
+        var auto = new Hex1bTerminalAutomator(terminal, defaultTimeout: TimeSpan.FromSeconds(500));
+        await using var terminalRun = CliE2ETestHelpers.StartRun(terminal, workspace, auto, counter, output, TestContext.Current.CancellationToken);
+
+        await auto.PrepareDockerEnvironmentAsync(counter, workspace);
+        await auto.InstallAspireCliAsync(strategy, counter);
+
+        await auto.RunCommandAsync("mkdir source-feed && cp \"$HOME\"/.aspire/hives/*/packages/Aspire.ProjectTemplates.*.nupkg source-feed/", counter);
+        await auto.RunCommandAsync("aspire --version > /tmp/aspire-source-version", counter);
+
+        // CLI update checks are independent from template source selection. Disable them so the
+        // TCP tripwire isolates template discovery and installation traffic from the update notifier.
+        await auto.RunCommandAsync("aspire config set features.updateNotificationsEnabled false -g", counter);
+        await auto.RunCommandAsync("aspire config set features.showAllTemplates true -g", counter);
+        await auto.RunCommandAsync(
+            "export ASPIRE_CLI_CHANNEL=staging ASPIRE_CLI_VERSION=\"$(cat /tmp/aspire-source-version)\" " +
+            "ASPIRE_CLI_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            counter);
+
+        // The selected .NET template restores after scaffolding. Keep that independent post-action
+        // on the local feed so the tripwire remains scoped to template discovery and installation.
+        await auto.RunCommandAsync("dotnet nuget disable source nuget.org", counter);
+        await auto.RunCommandAsync("dotnet nuget add source \"$PWD/source-feed\" --name source-override-e2e", counter);
+
+        // Package search can suppress source failures, so use a TCP tripwire to detect connection attempts independently of logs.
+        await auto.RunCommandAsync(
+            "printf '127.0.0.1 api.nuget.org azuresearch-usnc.nuget.org azuresearch-ussc.nuget.org pkgs.dev.azure.com\\n' >> /etc/hosts",
+            counter);
+        await auto.RunCommandAsync(
+            "rm -f /tmp/unexpected-nuget-source-contacted /tmp/nuget-source-listener-ready && " +
+            "python3 -c 'import pathlib,socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); " +
+            "s.bind((\"0.0.0.0\",443)); s.listen(); pathlib.Path(\"/tmp/nuget-source-listener-ready\").touch(); " +
+            "c,_=s.accept(); pathlib.Path(\"/tmp/unexpected-nuget-source-contacted\").touch(); c.close()' >/tmp/nuget-source-listener.log 2>&1 & " +
+            "for i in $(seq 1 100); do [ -f /tmp/nuget-source-listener-ready ] && break; sleep 0.1; done; " +
+            "if [ ! -f /tmp/nuget-source-listener-ready ]; then cat /tmp/nuget-source-listener.log; (exit 1); fi",
+            counter);
+        await auto.RunCommandAsync("rm -rf \"$HOME/.aspire/logs\" && mkdir -p \"$HOME/.aspire/logs\"", counter);
+
+        await auto.RunCommandAsync(
+            "aspire new aspire-servicedefaults --name SourceOverrideServiceDefaults --output SourceOverrideServiceDefaults " +
+            "--channel staging --source source-feed --non-interactive --suppress-agent-init --log-level Debug",
+            counter,
+            TimeSpan.FromMinutes(2));
+
+        await auto.RunCommandAsync("test -f SourceOverrideServiceDefaults/SourceOverrideServiceDefaults.csproj", counter);
+
+        // A local `--source` directory is enumerated directly rather than queried through a feed, so
+        // the observable evidence is the install itself: it runs from a source-scoped temporary
+        // NuGet.config directory and points `dotnet new install` at the .nupkg copied into
+        // source-feed. Logged lines look like:
+        //   Running dotnet in /tmp/aspire-nuget-configABC123 with args: new install /workspace/.../source-feed/Aspire.ProjectTemplates.13.0.0-preview.1.nupkg
+        // Match the argument list instead of the randomly-suffixed temp directory.
+        //
+        // The negative guard has to name the search path this CLI would actually take. Shipped (and
+        // CI-installed) CLIs are bundles, so a feed-backed template lookup goes through
+        // BundleNuGetPackageCache -> `aspire-managed nuget search`, which logs:
+        //   Running NuGet search via aspire-managed: Aspire.ProjectTemplates
+        //   NuGet search args: nuget search --query Aspire.ProjectTemplates --take 1000 --format json ...
+        // Those two Debug lines are the only trace of it, because the helper process itself is spawned
+        // with SuppressLogging (as is the SDK-backed `dotnet package search` fallback), so asserting on
+        // a logged `package search` command line can never fail and would not catch a regression.
+        // Because the positive assertion above matches a Debug line from the same log, an empty or
+        // level-filtered log cannot make these negative assertions pass vacuously.
+        await auto.RunCommandAsync(
+            "test ! -e /tmp/unexpected-nuget-source-contacted && " +
+            "find \"$HOME/.aspire/logs\" -type f -name '*.log' -print -quit | grep -q . && " +
+            "grep -R -F \"Resolved 'staging' channel\" \"$HOME/.aspire/logs\" && " +
+            "grep -R -E 'Running dotnet in .*aspire-nuget-config.* with args: new install [^ ]*/source-feed/Aspire\\.ProjectTemplates\\.[^ ]*\\.nupkg' \"$HOME/.aspire/logs\" && " +
+            "! grep -R -E -- 'Running NuGet search via aspire-managed: Aspire\\.ProjectTemplates|NuGet search args: nuget search --query Aspire\\.ProjectTemplates' \"$HOME/.aspire/logs\" && " +
+            "! grep -R -F -- '--nuget-source' \"$HOME/.aspire/logs\" && " +
+            "! grep -R -F 'api.nuget.org' \"$HOME/.aspire/logs\"",
+            counter);
     }
 }

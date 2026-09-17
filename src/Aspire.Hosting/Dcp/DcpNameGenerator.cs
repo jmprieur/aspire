@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREPROJECTS001
+
 using System.Collections.Immutable;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Utils;
@@ -14,10 +16,17 @@ internal sealed class DcpNameGenerator
     // A random suffix added to every DCP object name ensures that those names (and derived object names, for example container names)
     // are unique machine-wide with a high level of probability.
     // The length of 8 achieves that while keeping the names relatively short and readable.
-    // The second purpose of the suffix is to play a role of a unique OpenTelemetry service instance ID.
+    // The second purpose of the suffix is to play the role of a unique OpenTelemetry service instance ID for session resources.
     private const int RandomNameSuffixLength = 8;
     private readonly IConfiguration _configuration;
     private readonly IOptions<DcpOptions> _options;
+
+    // A map from (resource name, endpoint name, target network ID) => DCP service name. 
+    // Used for ensuring that we do not create duplicate DCP services for the same resource endpoint.
+    private readonly Dictionary<string, string> _networkServices = new();
+
+    // Helps ensure that service names are unique (service names do not use random suffixes).
+    private readonly HashSet<string> _allServiceNames = new();
 
     public DcpNameGenerator(IConfiguration configuration, IOptions<DcpOptions> options)
     {
@@ -27,6 +36,8 @@ internal sealed class DcpNameGenerator
 
     public void EnsureDcpInstancesPopulated(IResource resource)
     {
+        ThrowIfPersistentExecutableHasReplicas(resource);
+
         if (resource.TryGetInstances(out _))
         {
             return;
@@ -37,12 +48,7 @@ internal sealed class DcpNameGenerator
             var (name, suffix) = GetContainerName(resource);
             AddInstancesAnnotation(resource, [new DcpInstance(name, suffix, 0)]);
         }
-        else if (resource is ExecutableResource or ContainerExecutableResource)
-        {
-            var (name, suffix) = GetExecutableName(resource);
-            AddInstancesAnnotation(resource, [new DcpInstance(name, suffix, 0)]);
-        }
-        else if (resource is ProjectResource)
+        else if (resource is IDotnetProgramResource)
         {
             var replicas = resource.GetReplicaCount();
             var builder = ImmutableArray.CreateBuilder<DcpInstance>(replicas);
@@ -53,6 +59,11 @@ internal sealed class DcpNameGenerator
             }
             AddInstancesAnnotation(resource, builder.ToImmutable());
         }
+        else if (resource is ExecutableResource or ContainerExecutableResource)
+        {
+            var (name, suffix) = GetExecutableName(resource);
+            AddInstancesAnnotation(resource, [new DcpInstance(name, suffix, 0)]);
+        }
     }
 
     private static void AddInstancesAnnotation(IResource resource, ImmutableArray<DcpInstance> instances)
@@ -60,11 +71,24 @@ internal sealed class DcpNameGenerator
         resource.Annotations.Add(new DcpInstancesAnnotation(instances));
     }
 
+    private static void ThrowIfPersistentExecutableHasReplicas(IResource resource)
+    {
+        if (resource is not (ExecutableResource or ProjectResource))
+        {
+            return;
+        }
+
+        if (resource.GetReplicaCount() > 1 && resource.GetLifetimeType() == Lifetime.Persistent)
+        {
+            throw new InvalidOperationException($"Resource '{resource.Name}' uses multiple replicas and a persistent lifetime. These features do not work together.");
+        }
+    }
+
     public (string Name, string Suffix) GetContainerName(IResource container)
     {
-        var nameSuffix = container.GetContainerLifetimeType() switch
+        var nameSuffix = container.GetLifetimeType() switch
         {
-            ContainerLifetime.Session => GetRandomNameSuffix(),
+            Lifetime.Session => GetRandomNameSuffix(),
             _ => GetProjectHashSuffix(),
         };
 
@@ -73,36 +97,49 @@ internal sealed class DcpNameGenerator
 
     public (string Name, string Suffix) GetExecutableName(IResource project)
     {
-        var nameSuffix = GetRandomNameSuffix();
+        var nameSuffix = project.GetLifetimeType() switch
+        {
+            Lifetime.Session => GetRandomNameSuffix(),
+            _ => GetProjectHashSuffix(),
+        };
+
         return (GetObjectNameForResource(project, _options.Value, nameSuffix), nameSuffix);
     }
 
-    public string GetServiceName(IResource resource, EndpointAnnotation endpoint, bool hasMultipleEndpoints, HashSet<string> allServiceNames)
+    // Returns a DCP service name for the given resource/endpoint/network combination. 
+    // The returned boolean indicates whether a new service name was generated (true) or an existing one was returned (false).
+    public (string, bool) GetServiceName(IResource resource, EndpointAnnotation endpoint, NetworkIdentifier targetNetworkId)
     {
-        var candidateServiceName = !hasMultipleEndpoints
-            ? GetObjectNameForResource(resource, _options.Value)
-            : GetObjectNameForResource(resource, _options.Value, endpoint.Name);
+        var hasMultipleEndpoints = resource.Annotations.OfType<EndpointAnnotation>().Count() > 1;
+        var key = NetworkServiceKey(resource, endpoint, targetNetworkId);
 
-        return GenerateUniqueServiceName(allServiceNames, candidateServiceName);
-    }
-
-    private static string GenerateUniqueServiceName(HashSet<string> serviceNames, string candidateName)
-    {
-        int suffix = 1;
-        string uniqueName = candidateName;
-
-        while (!serviceNames.Add(uniqueName))
+        lock (_allServiceNames)
         {
-            uniqueName = $"{candidateName}-{suffix}";
-            suffix++;
-            if (suffix == 100)
+            if (_networkServices.TryGetValue(key, out var name))
             {
-                // Should never happen, but we do not want to ever get into a infinite loop situation either.
-                throw new ArgumentException($"Could not generate a unique name for service '{candidateName}'");
+                return (name, false);
             }
-        }
 
-        return uniqueName;
+            var candidateName = !hasMultipleEndpoints
+                ? GetObjectNameForResource(resource, _options.Value)
+                : GetObjectNameForResource(resource, _options.Value, endpoint.Name);
+
+            int suffix = 1;
+            string uniqueName = candidateName;
+
+            while (!_allServiceNames.Add(uniqueName))
+            {
+                uniqueName = $"{candidateName}-{suffix}";
+                suffix++;
+                if (suffix == 100)
+                {
+                    // Should never happen, but we do not want to ever get into a infinite loop situation either.
+                    throw new ArgumentException($"Could not generate a unique name for service '{candidateName}'");
+                }
+            }
+            _networkServices[key] = uniqueName;
+            return (uniqueName, true);
+        }
     }
 
     public static string GetRandomNameSuffix()
@@ -137,4 +174,7 @@ internal sealed class DcpNameGenerator
             };
         return maybeWithSuffix(resource.Name, suffix, options.ResourceNameSuffix);
     }
+
+    private static string NetworkServiceKey(IResource resource, EndpointAnnotation endpoint, NetworkIdentifier targetNetworkId)
+        => $"{resource.Name}|{endpoint.Name}|{targetNetworkId.Value}";
 }

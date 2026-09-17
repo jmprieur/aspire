@@ -1,17 +1,3091 @@
-﻿// Aspire.java - Capability-based Aspire SDK
-// GENERATED CODE - DO NOT EDIT
+﻿// ===== aspire/Aspire.java =====
+// Aspire.java - GENERATED CODE - DO NOT EDIT
 
 package aspire;
 
-import java.util.*;
-import java.util.function.*;
+import java.util.HashMap;
+import java.util.Map;
 
-// ============================================================================
-// Enums
-// ============================================================================
+/** Main entry point for Aspire SDK. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class Aspire {
+    /** Connect to the AppHost server. */
+    public static AspireClient connect() throws Exception {
+        BaseRegistrations.ensureRegistered();
+        AspireRegistrations.ensureRegistered();
+        String socketPath = System.getenv("REMOTE_APP_HOST_SOCKET_PATH");
+        if (socketPath == null || socketPath.isEmpty()) {
+            throw new RuntimeException("REMOTE_APP_HOST_SOCKET_PATH environment variable not set. Run this application using `aspire run`.");
+        }
+        AspireClient client = new AspireClient(socketPath);
+        client.connect();
+        String authToken = System.getenv("ASPIRE_REMOTE_APPHOST_TOKEN");
+        if (authToken == null || authToken.isEmpty()) {
+            throw new RuntimeException("ASPIRE_REMOTE_APPHOST_TOKEN environment variable not set. Run this application using `aspire run`.");
+        }
+        client.authenticate(authToken);
+        client.onDisconnect(() -> System.exit(1));
+        return client;
+    }
+
+    /** Create a new distributed application builder. */
+    public static IDistributedApplicationBuilder createBuilder(CreateBuilderOptions options) throws Exception {
+        AspireClient client = connect();
+        Map<String, Object> resolvedOptions = new HashMap<>();
+        if (options != null) {
+            resolvedOptions.putAll(options.toMap());
+        }
+        if (resolvedOptions.get("Args") == null) {
+            String forwardedArgs = System.getenv("ASPIRE_APPHOST_ARGS");
+            resolvedOptions.put("Args", forwardedArgs == null || forwardedArgs.isEmpty()
+                ? new String[0]
+                : forwardedArgs.split("\n", -1));
+        }
+        if (resolvedOptions.get("ProjectDirectory") == null) {
+            String projectDirectory = System.getenv("ASPIRE_PROJECT_DIRECTORY");
+            if (projectDirectory == null || projectDirectory.isEmpty()) {
+                projectDirectory = System.getProperty("user.dir");
+            }
+            resolvedOptions.put("ProjectDirectory", projectDirectory);
+        }
+        if (resolvedOptions.get("AppHostFilePath") == null) {
+            String appHostFilePath = System.getenv("ASPIRE_APPHOST_FILEPATH");
+            if (appHostFilePath != null && !appHostFilePath.isEmpty()) {
+                resolvedOptions.put("AppHostFilePath", appHostFilePath);
+            }
+        }
+        Map<String, Object> args = new HashMap<>();
+        args.put("argsOrOptions", resolvedOptions);
+        return (IDistributedApplicationBuilder) client.invokeCapability("Aspire.Hosting/createBuilder", args);
+    }
+}
+
+// ===== aspire/AspireAction0.java =====
+// AspireAction0.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireAction0 {
+    void invoke();
+}
+
+// ===== aspire/AspireAction1.java =====
+// AspireAction1.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireAction1<T1> {
+    void invoke(T1 arg1);
+}
+
+// ===== aspire/AspireAction2.java =====
+// AspireAction2.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireAction2<T1, T2> {
+    void invoke(T1 arg1, T2 arg2);
+}
+
+// ===== aspire/AspireAction3.java =====
+// AspireAction3.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireAction3<T1, T2, T3> {
+    void invoke(T1 arg1, T2 arg2, T3 arg3);
+}
+
+// ===== aspire/AspireAction4.java =====
+// AspireAction4.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireAction4<T1, T2, T3, T4> {
+    void invoke(T1 arg1, T2 arg2, T3 arg3, T4 arg4);
+}
+
+// ===== aspire/AspireClient.java =====
+// AspireClient.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.HashSet;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+/**
+ * AspireClient handles JSON-RPC communication with the AppHost server.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class AspireClient {
+    private static final boolean DEBUG = System.getenv("ASPIRE_DEBUG") != null;
+    private static final int MAX_PENDING_REMOTE_CANCELLATIONS = 1024;
+    private static final ThreadLocal<AspireClient> callbackClient = new ThreadLocal<>();
+    private static final ThreadLocal<List<CancellationToken>> callbackRemoteTokens = new ThreadLocal<>();
+    
+    private final String socketPath;
+    private OutputStream outputStream;
+    private InputStream inputStream;
+    // Windows only. inputStream/outputStream are built from this file's descriptor, so the
+    // RandomAccessFile has to outlive connect() -- closing it would close the descriptor they share
+    // and break the connection. Holding it in a field also makes that lifetime explicit to a
+    // compiler's resource-leak analysis, which cannot see the escape through FileDescriptor.
+    private RandomAccessFile namedPipe;
+    private final AtomicInteger requestId = new AtomicInteger(0);
+    private final Map<String, Function<Object[], Object>> callbacks = new ConcurrentHashMap<>();
+    private final Map<String, Consumer<Void>> cancellations = new ConcurrentHashMap<>();
+    private final Map<Integer, CompletableFuture<Object>> pendingRequests = new ConcurrentHashMap<>();
+    private final Map<String, CancellationRegistration> cancellationRegistrations = new ConcurrentHashMap<>();
+    private final Map<Object, String> activeCallbackRequests = new ConcurrentHashMap<>();
+    private final Map<String, CancellationToken> remoteCancellationTokens = new ConcurrentHashMap<>();
+    private final Map<String, CancellationToken> pendingRemoteCancellations = new LinkedHashMap<>();
+    private final Object readerLock = new Object();
+    private final Object connectionStateLock = new Object();
+    private volatile boolean readerStarted;
+    private volatile boolean disconnected;
+    private volatile Throwable disconnectCause;
+    private Runnable disconnectHandler;
+    private int activeServerCallbacks;
+
+    // Handle wrapper factory registry
+    private static final Map<String, BiFunction<Handle, AspireClient, Object>> handleWrappers = new ConcurrentHashMap<>();
+
+    public static void registerHandleWrapper(String typeId, BiFunction<Handle, AspireClient, Object> factory) {
+        handleWrappers.put(typeId, factory);
+    }
+
+    public AspireClient(String socketPath) {
+        this.socketPath = socketPath;
+    }
+
+    static AspireClient currentCallbackClient() {
+        return callbackClient.get();
+    }
+
+    CancellationToken getOrCreateRemoteCancellationToken(String cancellationId) {
+        CancellationToken token;
+        synchronized (connectionStateLock) {
+            if (disconnected) {
+                token = new CancellationToken(cancellationId, this);
+                token.retainRemoteReference();
+                token.markCancelled();
+            } else {
+                CancellationToken pendingCancellation = pendingRemoteCancellations.remove(cancellationId);
+                token = remoteCancellationTokens.compute(cancellationId, (id, existing) -> {
+                    CancellationToken retained = existing != null
+                        ? existing
+                        : pendingCancellation != null ? pendingCancellation : new CancellationToken(id, this);
+                    retained.retainRemoteReference();
+                    return retained;
+                });
+            }
+        }
+        callbackRemoteTokens.get().add(token);
+        return token;
+    }
+
+    void removeRemoteCancellationToken(String cancellationId, CancellationToken token) {
+        remoteCancellationTokens.remove(cancellationId, token);
+    }
+
+    void releaseRemoteCancellationToken(String cancellationId, CancellationToken token) {
+        remoteCancellationTokens.computeIfPresent(cancellationId, (id, existing) -> {
+            if (existing != token) {
+                return existing;
+            }
+            return token.decrementRemoteReference() == 0 ? null : token;
+        });
+    }
+
+    private boolean cancelRemoteCancellationToken(String cancellationId) {
+        CancellationToken token;
+        boolean notifyListeners;
+        synchronized (connectionStateLock) {
+            if (disconnected) {
+                return false;
+            }
+            token = remoteCancellationTokens.get(cancellationId);
+            if (token == null && activeServerCallbacks == 0) {
+                return false;
+            }
+            if (token == null) {
+                token = pendingRemoteCancellations.computeIfAbsent(
+                    cancellationId,
+                    id -> new CancellationToken(id, this));
+            } else if (activeServerCallbacks > 0) {
+                pendingRemoteCancellations.put(cancellationId, token);
+            }
+            while (pendingRemoteCancellations.size() > MAX_PENDING_REMOTE_CANCELLATIONS) {
+                String oldestId = pendingRemoteCancellations.keySet().iterator().next();
+                pendingRemoteCancellations.remove(oldestId);
+            }
+            notifyListeners = token.markCancelled();
+        }
+
+        if (notifyListeners) {
+            token.notifyCancellationListeners();
+        }
+        return true;
+    }
+
+    public void connect() throws IOException {
+        debug("Connecting to AppHost server at " + socketPath);
+        
+        if (isWindows()) {
+            connectWindowsNamedPipe();
+        } else {
+            connectUnixSocket();
+        }
+
+        ensureReaderLoopStarted();
+        
+        debug("Connected successfully");
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("win");
+    }
+
+    private void connectWindowsNamedPipe() throws IOException {
+        // Extract just the filename from the socket path for the named pipe
+        String pipeName = new java.io.File(socketPath).getName();
+        String pipePath = "\\\\.\\pipe\\" + pipeName;
+        debug("Opening Windows named pipe: " + pipePath);
+        
+        // Use RandomAccessFile to open the named pipe
+        namedPipe = new RandomAccessFile(pipePath, "rw");
+
+        // Create streams from the RandomAccessFile
+        FileDescriptor fd = namedPipe.getFD();
+        inputStream = new FileInputStream(fd);
+        outputStream = new FileOutputStream(fd);
+        
+        debug("Named pipe opened successfully");
+    }
+
+    private void connectUnixSocket() throws IOException {
+        // Use Java 16+ Unix domain socket support
+        debug("Opening Unix domain socket: " + socketPath);
+        var address = java.net.UnixDomainSocketAddress.of(socketPath);
+        var channel = java.nio.channels.SocketChannel.open(address);
+        
+        // Create streams from the channel
+        inputStream = java.nio.channels.Channels.newInputStream(channel);
+        outputStream = java.nio.channels.Channels.newOutputStream(channel);
+        
+        debug("Unix domain socket opened successfully");
+    }
+
+    public void onDisconnect(Runnable handler) {
+        boolean invokeImmediately;
+        synchronized (connectionStateLock) {
+            invokeImmediately = disconnected;
+            if (!invokeImmediately) {
+                disconnectHandler = handler;
+            }
+        }
+
+        if (invokeImmediately) {
+            handler.run();
+        }
+    }
+
+    public Object invokeCapability(String capabilityId, Map<String, Object> args) {
+        List<String> cancellationIds = new ArrayList<>();
+
+        try {
+            Map<String, Object> params = new HashMap<>();
+            params.put("capabilityId", capabilityId);
+            params.put("args", marshalTransportValue(args, cancellationIds));
+            var uniqueCancellationIds = new HashSet<>(cancellationIds);
+
+            return sendRequest("invokeCapability", params, () -> {
+                for (String cancellationId : uniqueCancellationIds) {
+                    CancellationRegistration registration = cancellationRegistrations.get(cancellationId);
+                    if (registration != null) {
+                        registration.enable();
+                    }
+                }
+            });
+        } finally {
+            for (String cancellationId : new HashSet<>(cancellationIds)) {
+                unregisterCancellation(cancellationId);
+            }
+        }
+    }
+
+    private Object sendRequest(String method, Object params) {
+        return sendRequest(method, params, null);
+    }
+
+    private Object sendRequest(String method, Object params, Runnable requestSent) {
+        CompletableFuture<Object> pendingResponse = new CompletableFuture<>();
+        int id;
+        synchronized (connectionStateLock) {
+            if (disconnected) {
+                throw disconnectedException();
+            }
+
+            id = requestId.incrementAndGet();
+            pendingRequests.put(id, pendingResponse);
+        }
+
+        Map<String, Object> request = new HashMap<>();
+        request.put("jsonrpc", "2.0");
+        request.put("id", id);
+        request.put("method", method);
+        request.put("params", params);
+
+        debug("Sending request " + method + " with id=" + id);
+
+        try {
+            ensureReaderLoopStarted();
+            sendMessage(request);
+            if (requestSent != null) {
+                requestSent.run();
+            }
+        } catch (IOException e) {
+            pendingRequests.remove(id);
+            handleDisconnect();
+            throw new RuntimeException("Failed to send request " + method + ": " + e.getMessage(), e);
+        }
+
+        try {
+            Object result = pendingResponse.join();
+            return unwrapResult(result);
+        } catch (CompletionException completionException) {
+            Throwable cause = completionException.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new RuntimeException("Request " + method + " failed", cause);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object marshalTransportValue(Object value) {
+        return marshalTransportValue(value, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object marshalTransportValue(Object value, List<String> cancellationIds) {
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof CancellationToken token) {
+            String cancellationId = registerCancellation(token, false);
+            if (cancellationId != null && cancellationIds != null && cancellationRegistrations.containsKey(cancellationId)) {
+                cancellationIds.add(cancellationId);
+            }
+            return cancellationId;
+        }
+
+        if (value instanceof Function<?, ?> function) {
+            Function<Object, Object> typedFunction = (Function<Object, Object>) function;
+            return registerCallback(args -> typedFunction.apply(args.length > 0 ? args[0] : null));
+        }
+
+        Object serialized = serializeValue(value);
+        if (serialized instanceof Map) {
+            Map<String, Object> map = (Map<String, Object>) serialized;
+            Map<String, Object> result = new HashMap<>();
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                result.put(entry.getKey(), marshalTransportValue(entry.getValue(), cancellationIds));
+            }
+            return result;
+        }
+        if (serialized instanceof List) {
+            List<Object> list = (List<Object>) serialized;
+            List<Object> result = new ArrayList<>();
+            for (Object item : list) {
+                result.add(marshalTransportValue(item, cancellationIds));
+            }
+            return result;
+        }
+        if (serialized instanceof Object[] array) {
+            List<Object> result = new ArrayList<>();
+            for (Object item : array) {
+                result.add(marshalTransportValue(item, cancellationIds));
+            }
+            return result;
+        }
+
+        return serialized;
+    }
+
+    public void authenticate(String token) {
+        Object result = sendRequest("authenticate", List.of(token));
+        if (!(result instanceof Boolean authenticated) || !authenticated) {
+            throw new RuntimeException("Failed to authenticate to the AppHost server.");
+        }
+    }
+
+    private void sendMessage(Map<String, Object> message) throws IOException {
+        String json = toJson(message);
+        byte[] content = json.getBytes(StandardCharsets.UTF_8);
+        String header = "Content-Length: " + content.length + "\r\n\r\n";
+        
+        debug("Writing message: " + message.get("method") + " (id=" + message.get("id") + ")");
+        
+        synchronized (outputStream) {
+            outputStream.write(header.getBytes(StandardCharsets.UTF_8));
+            outputStream.write(content);
+            outputStream.flush();
+        }
+    }
+
+    private void ensureReaderLoopStarted() {
+        synchronized (readerLock) {
+            if (readerStarted) {
+                return;
+            }
+
+            if (inputStream == null) {
+                throw new IllegalStateException("Input stream is not initialized");
+            }
+
+            readerStarted = true;
+
+            Thread readerThread = new Thread(this::readLoop, "aspire-client-reader");
+            readerThread.setDaemon(true);
+            readerThread.start();
+        }
+    }
+
+    private void readLoop() {
+        try {
+            while (true) {
+                Map<String, Object> message = readMessage();
+                routeMessage(message);
+            }
+        } catch (Exception e) {
+            disconnectCause = e;
+            handleDisconnect();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void routeMessage(Map<String, Object> message) throws IOException {
+        if (message.containsKey("method")) {
+            if ("$/cancelRequest".equals(message.get("method"))) {
+                routeCancellationNotification(message.get("params"));
+                return;
+            }
+
+            boolean isCallback = "invokeCallback".equals(message.get("method"));
+            Object callbackRequestId = isCallback ? message.get("id") : null;
+            String callbackCancellationId = isCallback ? getCallbackCancellationId(message.get("params")) : null;
+            if (isCallback) {
+                synchronized (connectionStateLock) {
+                    activeServerCallbacks++;
+                }
+                if (callbackRequestId != null && callbackCancellationId != null) {
+                    activeCallbackRequests.put(callbackRequestId, callbackCancellationId);
+                }
+            }
+            try {
+                Thread.startVirtualThread(() -> {
+                    try {
+                        handleServerRequest(message);
+                    } catch (IOException e) {
+                        disconnectCause = e;
+                        handleDisconnect();
+                    } finally {
+                        if (isCallback) {
+                            completeServerCallback(callbackRequestId, callbackCancellationId);
+                        }
+                    }
+                });
+            } catch (RuntimeException e) {
+                if (isCallback) {
+                    completeServerCallback(callbackRequestId, callbackCancellationId);
+                }
+                throw e;
+            }
+            return;
+        }
+
+        Integer responseId = toNumericId(message.get("id"));
+        if (responseId == null) {
+            throw new IOException("Invalid JSON-RPC response: numeric id is required.");
+        }
+
+        CompletableFuture<Object> pendingResponse = pendingRequests.get(responseId);
+        if (pendingResponse == null) {
+            return;
+        }
+
+        if (message.containsKey("error")) {
+            Map<String, Object> error = (Map<String, Object>) message.get("error");
+            String code = String.valueOf(error.get("code"));
+            String errorMessage = String.valueOf(error.get("message"));
+            Object data = error.get("data");
+            pendingResponse.completeExceptionally(new CapabilityError(code, errorMessage, data));
+            pendingRequests.remove(responseId, pendingResponse);
+            return;
+        }
+
+        pendingResponse.complete(message.get("result"));
+        pendingRequests.remove(responseId, pendingResponse);
+    }
+
+    private void completeServerCallback(Object callbackRequestId, String callbackCancellationId) {
+        if (callbackRequestId != null && callbackCancellationId != null) {
+            activeCallbackRequests.remove(callbackRequestId, callbackCancellationId);
+        }
+        synchronized (connectionStateLock) {
+            activeServerCallbacks--;
+            if (activeServerCallbacks == 0) {
+                pendingRemoteCancellations.clear();
+            }
+        }
+    }
+
+    private Integer toNumericId(Object id) {
+        if (id instanceof Number number) {
+            try {
+                return new BigDecimal(number.toString()).intValueExact();
+            } catch (ArithmeticException | NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readMessage() throws IOException {
+        // Read headers
+        int contentLength = -1;
+        
+        while (true) {
+            String line = readLine();
+            if (line.isEmpty()) {
+                break;
+            }
+            if (line.startsWith("Content-Length:")) {
+                contentLength = Integer.parseInt(line.substring(15).trim());
+            }
+        }
+        
+        if (contentLength < 0) {
+            throw new IOException("No Content-Length header found");
+        }
+        
+        // Read body
+        byte[] body = new byte[contentLength];
+        int totalRead = 0;
+        while (totalRead < contentLength) {
+            int read = inputStream.read(body, totalRead, contentLength - totalRead);
+            if (read < 0) {
+                throw new IOException("Unexpected end of stream");
+            }
+            totalRead += read;
+        }
+        
+        String json = new String(body, StandardCharsets.UTF_8);
+        debug("Received: " + json.substring(0, Math.min(200, json.length())) + "...");
+        
+        return (Map<String, Object>) parseJson(json);
+    }
+
+    private String readLine() throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int ch;
+        while ((ch = inputStream.read()) != -1) {
+            if (ch == '\r') {
+                int next = inputStream.read();
+                if (next == '\n') {
+                    break;
+                }
+                sb.append((char) ch);
+                if (next != -1) sb.append((char) next);
+            } else if (ch == '\n') {
+                break;
+            } else {
+                sb.append((char) ch);
+            }
+        }
+        return sb.toString();
+    }
+
+    private void routeCancellationNotification(Object params) {
+        Object callbackRequestId = getCancelledRequestId(params);
+        if (callbackRequestId == null) {
+            return;
+        }
+
+        // Resolve the callback request id on the reader before callback completion removes
+        // its correlation entry. Only listener execution moves to the virtual thread.
+        String cancellationId = activeCallbackRequests.get(callbackRequestId);
+        if (cancellationId == null) {
+            return;
+        }
+
+        Thread.startVirtualThread(() -> {
+            try {
+                cancelRemoteCancellationToken(cancellationId);
+            } catch (RuntimeException exception) {
+                debug("Cancellation listener failed.", exception);
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private void handleServerRequest(Map<String, Object> request) throws IOException {
+        String method = (String) request.get("method");
+        Object idObj = request.get("id");
+        Object params = request.get("params");
+
+        debug("Received server request: " + method);
+
+        Object result = null;
+        Map<String, Object> error = null;
+
+        try {
+            if ("invokeCallback".equals(method)) {
+                String callbackId = getCallbackId(params);
+                if (callbackId == null) {
+                    error = createError(-32602, "Invalid params: callbackId is required.");
+                } else {
+                    List<Object> args = getCallbackArgs(params);
+
+                    Function<Object[], Object> callback = callbacks.get(callbackId);
+                    if (callback != null) {
+                        Object[] unwrappedArgs = args.stream()
+                            .map(this::unwrapResult)
+                            .toArray();
+                        AspireClient previousCallbackClient = callbackClient.get();
+                        List<CancellationToken> previousRemoteTokens = callbackRemoteTokens.get();
+                        List<CancellationToken> acquiredRemoteTokens = new ArrayList<>();
+                        callbackClient.set(this);
+                        callbackRemoteTokens.set(acquiredRemoteTokens);
+                        try {
+                            result = awaitValue(callback.apply(unwrappedArgs));
+                        } finally {
+                            for (CancellationToken token : acquiredRemoteTokens) {
+                                token.releaseRemoteReference();
+                            }
+                            if (previousCallbackClient == null) {
+                                callbackClient.remove();
+                            } else {
+                                callbackClient.set(previousCallbackClient);
+                            }
+                            if (previousRemoteTokens == null) {
+                                callbackRemoteTokens.remove();
+                            } else {
+                                callbackRemoteTokens.set(previousRemoteTokens);
+                            }
+                        }
+                    } else {
+                        error = createError(-32601, "Callback not found: " + callbackId);
+                    }
+                }
+            } else if ("cancel".equals(method) || "cancelToken".equals(method)) {
+                String cancellationId = getCancellationId(params);
+                if (cancellationId == null) {
+                    error = createError(-32602, "Invalid params: cancellationId is required.");
+                } else {
+                    boolean cancelled = cancelRemoteCancellationToken(cancellationId);
+                    Consumer<Void> handler = cancellations.get(cancellationId);
+                    if (handler != null) {
+                        handler.accept(null);
+                        cancelled = true;
+                    }
+                    result = cancelled;
+                }
+            } else {
+                error = createError(-32601, "Unknown method: " + method);
+            }
+        } catch (Exception e) {
+            error = createError(-32603, e.getMessage());
+        }
+
+        if (!request.containsKey("id")) {
+            return;
+        }
+
+        // Send response
+        Map<String, Object> response = new HashMap<>();
+        response.put("jsonrpc", "2.0");
+        response.put("id", idObj);
+        if (error != null) {
+            response.put("error", error);
+        } else {
+            response.put("result", serializeValue(result));
+        }
+        
+        sendMessage(response);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String getCallbackId(Object params) {
+        if (params instanceof List<?> list && !list.isEmpty()) {
+            return asString(list.get(0));
+        }
+
+        if (params instanceof Map<?, ?> map) {
+            return asString(map.get("callbackId"));
+        }
+
+        return null;
+    }
+
+    private String getCallbackCancellationId(Object params) {
+        Object args = null;
+        if (params instanceof List<?> list && list.size() > 1) {
+            args = list.get(1);
+        } else if (params instanceof Map<?, ?> map) {
+            args = map.get("args");
+        }
+
+        // Generated cancellable callbacks include the token id in both its positional slot and:
+        //   "args": { "p0": "<token-id>", "$cancellationToken": "<token-id>" }
+        // The named entry lets transport cancellation find the token without knowing its position.
+        if (args instanceof Map<?, ?> map) {
+            return asString(map.get("$cancellationToken"));
+        }
+
+        return null;
+    }
+
+    private Object getCancelledRequestId(Object params) {
+        // StreamJsonRpc cancels an invocation with:
+        //   { "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": <request-id> } }
+        // Preserve the parsed id type so a string id such as "41" never matches numeric id 41.
+        if (params instanceof Map<?, ?> map) {
+            Object id = map.get("id");
+            if (id instanceof String || id instanceof Number) {
+                return id;
+            }
+        }
+
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Object> getCallbackArgs(Object params) {
+        Object args = null;
+        if (params instanceof List<?> list && list.size() > 1) {
+            args = list.get(1);
+        } else if (params instanceof Map<?, ?> map) {
+            args = map.get("args");
+        }
+
+        if (args instanceof Map<?, ?> map) {
+            List<Object> positionalArgs = new ArrayList<>();
+            for (var i = 0; ; i++) {
+                var key = "p" + i;
+                if (map.containsKey(key)) {
+                    positionalArgs.add(map.get(key));
+                } else {
+                    break;
+                }
+            }
+            return positionalArgs;
+        }
+
+        if (args instanceof List<?> list) {
+            return (List<Object>) list;
+        }
+
+        return args == null ? List.of() : List.of(args);
+    }
+
+    private String getCancellationId(Object params) {
+        if (params instanceof String id) {
+            return id;
+        }
+
+        if (params instanceof List<?> list && !list.isEmpty()) {
+            return asString(list.get(0));
+        }
+
+        if (params instanceof Map<?, ?> map) {
+            return asString(map.get("cancellationId"));
+        }
+
+        return null;
+    }
+
+    private String asString(Object value) {
+        return value instanceof String string ? string : null;
+    }
+
+    private Map<String, Object> createError(int code, String message) {
+        Map<String, Object> error = new HashMap<>();
+        error.put("code", code);
+        error.put("message", message);
+        return error;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object unwrapResult(Object value) {
+        if (value == null) {
+            return null;
+        }
+        
+        if (value instanceof Map) {
+            Map<String, Object> map = (Map<String, Object>) value;
+            
+            // Check for handle
+            if (map.containsKey("$handle")) {
+                String handleId = (String) map.get("$handle");
+                String typeId = (String) map.get("$type");
+                Handle handle = new Handle(handleId, typeId);
+                
+                BiFunction<Handle, AspireClient, Object> factory = handleWrappers.get(typeId);
+                if (factory != null) {
+                    return factory.apply(handle, this);
+                }
+                return handle;
+            }
+            
+            // Check for error
+            if (map.containsKey("$error")) {
+                Map<String, Object> errorData = (Map<String, Object>) map.get("$error");
+                String code = String.valueOf(errorData.get("code"));
+                String message = String.valueOf(errorData.get("message"));
+                throw new CapabilityError(code, message, errorData.get("data"));
+            }
+            
+            // Recursively unwrap map values
+            Map<String, Object> result = new HashMap<>();
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                result.put(entry.getKey(), unwrapResult(entry.getValue()));
+            }
+            return result;
+        }
+        
+        if (value instanceof List) {
+            List<Object> list = (List<Object>) value;
+            List<Object> result = new ArrayList<>();
+            for (Object item : list) {
+                result.add(unwrapResult(item));
+            }
+            return result;
+        }
+        
+        return value;
+    }
+
+    private void handleDisconnect() {
+        Runnable handler;
+        List<CancellationToken> tokensToNotify = new ArrayList<>();
+        synchronized (connectionStateLock) {
+            if (disconnected) {
+                return;
+            }
+
+            disconnected = true;
+            failAllPendingRequests(disconnectedException());
+            for (CancellationToken remoteToken : remoteCancellationTokens.values()) {
+                if (remoteToken.markCancelled()) {
+                    tokensToNotify.add(remoteToken);
+                }
+            }
+            for (CancellationToken pendingToken : pendingRemoteCancellations.values()) {
+                if (pendingToken.markCancelled()) {
+                    tokensToNotify.add(pendingToken);
+                }
+            }
+            remoteCancellationTokens.clear();
+            pendingRemoteCancellations.clear();
+            activeCallbackRequests.clear();
+            handler = disconnectHandler;
+        }
+
+        for (CancellationToken remoteToken : tokensToNotify) {
+            try {
+                remoteToken.notifyCancellationListeners();
+            } catch (RuntimeException exception) {
+                debug("Cancellation listener failed during disconnect.", exception);
+            }
+        }
+
+        if (handler != null) {
+            handler.run();
+        }
+    }
+
+    private RuntimeException disconnectedException() {
+        Throwable cause = disconnectCause;
+        return cause == null
+            ? new RuntimeException("Disconnected from AppHost")
+            : new RuntimeException("Disconnected from AppHost", cause);
+    }
+
+    private void failAllPendingRequests(RuntimeException exception) {
+        for (Map.Entry<Integer, CompletableFuture<Object>> entry : pendingRequests.entrySet()) {
+            entry.getValue().completeExceptionally(exception);
+        }
+        pendingRequests.clear();
+    }
+
+    public String registerCallback(Function<Object[], Object> callback) {
+        String id = UUID.randomUUID().toString();
+        callbacks.put(id, callback);
+        return id;
+    }
+
+    public String registerCancellation(CancellationToken token) {
+        return registerCancellation(token, true);
+    }
+
+    private String registerCancellation(CancellationToken token, boolean enabled) {
+        if (token == null) {
+            return null;
+        }
+
+        String remoteTokenId = token.getRemoteTokenId();
+        if (remoteTokenId != null) {
+            return remoteTokenId;
+        }
+
+        String id = UUID.randomUUID().toString();
+        var registration = new CancellationRegistration(id, token, enabled);
+        cancellationRegistrations.put(id, registration);
+        registration.attach();
+        return id;
+    }
+
+    public void unregisterCancellation(String cancellationId) {
+        CancellationRegistration registration = cancellationRegistrations.remove(cancellationId);
+        if (registration != null) {
+            registration.dispose();
+        }
+    }
+
+    private final class CancellationRegistration {
+        private final String id;
+        private final CancellationToken token;
+        private final Runnable listener;
+        private final AtomicBoolean enabled;
+        private final AtomicBoolean requested = new AtomicBoolean(false);
+        private final AtomicBoolean sent = new AtomicBoolean(false);
+
+        CancellationRegistration(String id, CancellationToken token, boolean enabled) {
+            this.id = id;
+            this.token = token;
+            this.enabled = new AtomicBoolean(enabled);
+            this.listener = this::requestCancellation;
+        }
+
+        void attach() {
+            token.onCancel(listener);
+        }
+
+        void enable() {
+            enabled.set(true);
+            trySend();
+        }
+
+        void dispose() {
+            token.removeCancelListener(listener);
+        }
+
+        private void requestCancellation() {
+            requested.set(true);
+            trySend();
+        }
+
+        private void trySend() {
+            if (enabled.get() && requested.get() && sent.compareAndSet(false, true)) {
+                sendCancellationRequest(id);
+            }
+        }
+    }
+
+    private void sendCancellationRequest(String cancellationId) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                sendRequest("cancelToken", List.of(cancellationId));
+            } catch (RuntimeException ignored) {
+                // Cancellation is best-effort. The host may already have completed the operation.
+            }
+        });
+    }
+
+    public static Object awaitValue(Object value) {
+        if (value instanceof CompletionStage<?> stage) {
+            return stage.toCompletableFuture().join();
+        }
+        return value;
+    }
+
+    public static Object convertArray(Object value, Class<?> componentType, Function<Object, Object> converter) {
+        List<?> values = (List<?>) value;
+        Object array = java.lang.reflect.Array.newInstance(componentType, values.size());
+        for (int i = 0; i < values.size(); i++) {
+            java.lang.reflect.Array.set(array, i, converter.apply(values.get(i)));
+        }
+        return array;
+    }
+
+    // Simple JSON serialization (no external dependencies)
+    public static Object serializeValue(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Handle) {
+            return ((Handle) value).toJson();
+        }
+        if (value instanceof HandleWrapperBase) {
+            return ((HandleWrapperBase) value).getHandle().toJson();
+        }
+        if (value instanceof ReferenceExpression) {
+            return ((ReferenceExpression) value).toJson();
+        }
+        if (value instanceof AspireUnion union) {
+            return serializeValue(union.getValue());
+        }
+        if (value instanceof JsonSerializable jsonSerializable) {
+            return jsonSerializable.toMap();
+        }
+        if (value instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) value;
+            Map<String, Object> result = new HashMap<>();
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                result.put(entry.getKey(), serializeValue(entry.getValue()));
+            }
+            return result;
+        }
+        if (value instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<Object> list = (List<Object>) value;
+            List<Object> result = new ArrayList<>();
+            for (Object item : list) {
+                result.add(serializeValue(item));
+            }
+            return result;
+        }
+        if (value.getClass().isArray()) {
+            int length = java.lang.reflect.Array.getLength(value);
+            List<Object> result = new ArrayList<>();
+            for (int i = 0; i < length; i++) {
+                result.add(serializeValue(java.lang.reflect.Array.get(value, i)));
+            }
+            return result;
+        }
+        if (value instanceof WireValueEnum wireValueEnum) {
+            return wireValueEnum.getValue();
+        }
+        if (value instanceof Enum) {
+            return ((Enum<?>) value).name();
+        }
+        return value;
+    }
+
+    // Simple JSON encoding
+    private String toJson(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof String) {
+            return "\"" + escapeJson((String) value) + "\"";
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return value.toString();
+        }
+        if (value instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) value;
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append("\"").append(escapeJson(entry.getKey())).append("\":");
+                sb.append(toJson(entry.getValue()));
+            }
+            sb.append("}");
+            return sb.toString();
+        }
+        if (value instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<Object> list = (List<Object>) value;
+            StringBuilder sb = new StringBuilder("[");
+            boolean first = true;
+            for (Object item : list) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append(toJson(item));
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        if (value instanceof Object[]) {
+            Object[] array = (Object[]) value;
+            StringBuilder sb = new StringBuilder("[");
+            boolean first = true;
+            for (Object item : array) {
+                if (!first) sb.append(",");
+                first = false;
+                sb.append(toJson(item));
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        return "\"" + escapeJson(value.toString()) + "\"";
+    }
+
+    private String escapeJson(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.toCharArray()) {
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < ' ') {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
+    // Simple JSON parsing
+    @SuppressWarnings("unchecked")
+    private Object parseJson(String json) {
+        return new JsonParser(json).parse();
+    }
+
+    private static class JsonParser {
+        private final String json;
+        private int pos = 0;
+
+        JsonParser(String json) {
+            this.json = json;
+        }
+
+        Object parse() {
+            skipWhitespace();
+            return parseValue();
+        }
+
+        private Object parseValue() {
+            skipWhitespace();
+            char c = peek();
+            if (c == '{') return parseObject();
+            if (c == '[') return parseArray();
+            if (c == '"') return parseString();
+            if (c == 't' || c == 'f') return parseBoolean();
+            if (c == 'n') return parseNull();
+            if (c == '-' || Character.isDigit(c)) return parseNumber();
+            throw new RuntimeException("Unexpected character: " + c + " at position " + pos);
+        }
+
+        private Map<String, Object> parseObject() {
+            expect('{');
+            Map<String, Object> map = new LinkedHashMap<>();
+            skipWhitespace();
+            if (peek() != '}') {
+                do {
+                    skipWhitespace();
+                    String key = parseString();
+                    skipWhitespace();
+                    expect(':');
+                    Object value = parseValue();
+                    map.put(key, value);
+                    skipWhitespace();
+                } while (tryConsume(','));
+            }
+            expect('}');
+            return map;
+        }
+
+        private List<Object> parseArray() {
+            expect('[');
+            List<Object> list = new ArrayList<>();
+            skipWhitespace();
+            if (peek() != ']') {
+                do {
+                    list.add(parseValue());
+                    skipWhitespace();
+                } while (tryConsume(','));
+            }
+            expect(']');
+            return list;
+        }
+
+        private String parseString() {
+            expect('"');
+            StringBuilder sb = new StringBuilder();
+            while (pos < json.length()) {
+                char c = json.charAt(pos++);
+                if (c == '"') return sb.toString();
+                if (c == '\\') {
+                    c = json.charAt(pos++);
+                    switch (c) {
+                        case '"': case '\\': case '/': sb.append(c); break;
+                        case 'b': sb.append('\b'); break;
+                        case 'f': sb.append('\f'); break;
+                        case 'n': sb.append('\n'); break;
+                        case 'r': sb.append('\r'); break;
+                        case 't': sb.append('\t'); break;
+                        case 'u':
+                            String hex = json.substring(pos, pos + 4);
+                            sb.append((char) Integer.parseInt(hex, 16));
+                            pos += 4;
+                            break;
+                    }
+                } else {
+                    sb.append(c);
+                }
+            }
+            throw new RuntimeException("Unterminated string");
+        }
+
+        private Number parseNumber() {
+            int start = pos;
+            if (peek() == '-') pos++;
+            while (pos < json.length() && Character.isDigit(json.charAt(pos))) pos++;
+            if (pos < json.length() && json.charAt(pos) == '.') {
+                pos++;
+                while (pos < json.length() && Character.isDigit(json.charAt(pos))) pos++;
+            }
+            if (pos < json.length() && (json.charAt(pos) == 'e' || json.charAt(pos) == 'E')) {
+                pos++;
+                if (pos < json.length() && (json.charAt(pos) == '+' || json.charAt(pos) == '-')) pos++;
+                while (pos < json.length() && Character.isDigit(json.charAt(pos))) pos++;
+            }
+            String numStr = json.substring(start, pos);
+            if (numStr.contains(".") || numStr.contains("e") || numStr.contains("E")) {
+                return new BigDecimal(numStr);
+            }
+            long l = Long.parseLong(numStr);
+            if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+                return (int) l;
+            }
+            return l;
+        }
+
+        private Boolean parseBoolean() {
+            if (json.startsWith("true", pos)) {
+                pos += 4;
+                return true;
+            }
+            if (json.startsWith("false", pos)) {
+                pos += 5;
+                return false;
+            }
+            throw new RuntimeException("Expected boolean at position " + pos);
+        }
+
+        private Object parseNull() {
+            if (json.startsWith("null", pos)) {
+                pos += 4;
+                return null;
+            }
+            throw new RuntimeException("Expected null at position " + pos);
+        }
+
+        private void skipWhitespace() {
+            while (pos < json.length() && Character.isWhitespace(json.charAt(pos))) pos++;
+        }
+
+        private char peek() {
+            return pos < json.length() ? json.charAt(pos) : '\0';
+        }
+
+        private void expect(char c) {
+            skipWhitespace();
+            if (pos >= json.length() || json.charAt(pos) != c) {
+                throw new RuntimeException("Expected '" + c + "' at position " + pos);
+            }
+            pos++;
+        }
+
+        private boolean tryConsume(char c) {
+            skipWhitespace();
+            if (pos < json.length() && json.charAt(pos) == c) {
+                pos++;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private void debug(String message) {
+        if (DEBUG) {
+            System.err.println("[Java ATS] " + message);
+        }
+    }
+
+    private void debug(String message, Throwable error) {
+        if (DEBUG) {
+            System.err.println("[Java ATS] " + message);
+            error.printStackTrace(System.err);
+        }
+    }
+}
+
+// ===== aspire/AspireDict.java =====
+// AspireDict.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * AspireDict is a handle-backed dictionary with lazy handle resolution.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class AspireDict<K, V> extends HandleWrapperBase {
+    private final String getterCapabilityId;
+    private Handle resolvedHandle;
+
+    AspireDict(Handle handle, AspireClient client) {
+        super(handle, client);
+        this.getterCapabilityId = null;
+        this.resolvedHandle = handle;
+    }
+
+    AspireDict(Handle contextHandle, AspireClient client, String getterCapabilityId) {
+        super(contextHandle, client);
+        this.getterCapabilityId = getterCapabilityId;
+        this.resolvedHandle = null;
+    }
+
+    private Handle ensureHandle() {
+        if (resolvedHandle != null) {
+            return resolvedHandle;
+        }
+        if (getterCapabilityId != null) {
+            Map<String, Object> args = new HashMap<>();
+            args.put("context", getHandle().toJson());
+            Object result = getClient().invokeCapability(getterCapabilityId, args);
+            if (result instanceof Handle handle) {
+                resolvedHandle = handle;
+            }
+        }
+        if (resolvedHandle == null) {
+            resolvedHandle = getHandle();
+        }
+        return resolvedHandle;
+    }
+
+    public int size() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.count", Map.of("dict", ensureHandle().toJson()));
+        return ((Number) result).intValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    public V get(K key) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("dict", ensureHandle().toJson());
+        args.put("key", AspireClient.serializeValue(key));
+        return (V) getClient().invokeCapability("Aspire.Hosting/Dict.get", args);
+    }
+
+    public void put(K key, V value) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("dict", ensureHandle().toJson());
+        args.put("key", AspireClient.serializeValue(key));
+        args.put("value", AspireClient.serializeValue(value));
+        getClient().invokeCapability("Aspire.Hosting/Dict.set", args);
+    }
+
+    public boolean remove(K key) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("dict", ensureHandle().toJson());
+        args.put("key", AspireClient.serializeValue(key));
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.remove", args);
+        return Boolean.TRUE.equals(result);
+    }
+
+    public boolean containsKey(K key) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("dict", ensureHandle().toJson());
+        args.put("key", AspireClient.serializeValue(key));
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.has", args);
+        return Boolean.TRUE.equals(result);
+    }
+
+    /**
+     * Gets the keys in the dictionary.
+     *
+     * @return a snapshot of the keys
+     */
+    @SuppressWarnings("unchecked")
+    public List<K> keys() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.keys", Map.of("dict", ensureHandle().toJson()));
+        return (List<K>) result;
+    }
+
+    /**
+     * Gets the values in the dictionary.
+     *
+     * @return a snapshot of the values
+     */
+    @SuppressWarnings("unchecked")
+    public List<V> values() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.values", Map.of("dict", ensureHandle().toJson()));
+        return (List<V>) result;
+    }
+
+    /**
+     * Removes all entries from the dictionary.
+     */
+    public void clear() {
+        getClient().invokeCapability("Aspire.Hosting/Dict.clear", Map.of("dict", ensureHandle().toJson()));
+    }
+
+    /**
+     * Copies the dictionary into a plain {@link Map}. Later mutations of the
+     * underlying app model are not reflected in the returned copy.
+     *
+     * @return a snapshot of the dictionary contents
+     */
+    @SuppressWarnings("unchecked")
+    public Map<K, V> toMap() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/Dict.toObject", Map.of("dict", ensureHandle().toJson()));
+        return (Map<K, V>) result;
+    }
+}
+
+// ===== aspire/AspireFunc0.java =====
+// AspireFunc0.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireFunc0<R> {
+    R invoke();
+}
+
+// ===== aspire/AspireFunc1.java =====
+// AspireFunc1.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireFunc1<T1, R> {
+    R invoke(T1 arg1);
+}
+
+// ===== aspire/AspireFunc2.java =====
+// AspireFunc2.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireFunc2<T1, T2, R> {
+    R invoke(T1 arg1, T2 arg2);
+}
+
+// ===== aspire/AspireFunc3.java =====
+// AspireFunc3.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireFunc3<T1, T2, T3, R> {
+    R invoke(T1 arg1, T2 arg2, T3 arg3);
+}
+
+// ===== aspire/AspireFunc4.java =====
+// AspireFunc4.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+@FunctionalInterface
+public interface AspireFunc4<T1, T2, T3, T4, R> {
+    R invoke(T1 arg1, T2 arg2, T3 arg3, T4 arg4);
+}
+
+// ===== aspire/AspireList.java =====
+// AspireList.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * AspireList is a handle-backed list with lazy handle resolution.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class AspireList<T> extends HandleWrapperBase {
+    private final String getterCapabilityId;
+    private Handle resolvedHandle;
+
+    AspireList(Handle handle, AspireClient client) {
+        super(handle, client);
+        this.getterCapabilityId = null;
+        this.resolvedHandle = handle;
+    }
+
+    AspireList(Handle contextHandle, AspireClient client, String getterCapabilityId) {
+        super(contextHandle, client);
+        this.getterCapabilityId = getterCapabilityId;
+        this.resolvedHandle = null;
+    }
+
+    private Handle ensureHandle() {
+        if (resolvedHandle != null) {
+            return resolvedHandle;
+        }
+        if (getterCapabilityId != null) {
+            Map<String, Object> args = new HashMap<>();
+            args.put("context", getHandle().toJson());
+            Object result = getClient().invokeCapability(getterCapabilityId, args);
+            if (result instanceof Handle handle) {
+                resolvedHandle = handle;
+            }
+        }
+        if (resolvedHandle == null) {
+            resolvedHandle = getHandle();
+        }
+        return resolvedHandle;
+    }
+
+    /**
+     * Gets the number of elements in the list.
+     *
+     * @return the element count
+     */
+    public int size() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/List.length", Map.of("list", ensureHandle().toJson()));
+        return ((Number) result).intValue();
+    }
+
+    /**
+     * Gets the element at the specified index.
+     *
+     * @param index the zero-based index
+     * @return the element at {@code index}
+     */
+    @SuppressWarnings("unchecked")
+    public T get(int index) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("list", ensureHandle().toJson());
+        args.put("index", index);
+        return (T) getClient().invokeCapability("Aspire.Hosting/List.get", args);
+    }
+
+    /**
+     * Appends an element to the end of the list.
+     *
+     * @param item the element to append
+     */
+    public void add(T item) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("list", ensureHandle().toJson());
+        args.put("item", AspireClient.serializeValue(item));
+        getClient().invokeCapability("Aspire.Hosting/List.add", args);
+    }
+
+    /**
+     * Removes the element at the specified index.
+     *
+     * @param index the zero-based index
+     * @return {@code true} if an element was removed
+     */
+    public boolean remove(int index) {
+        Map<String, Object> args = new HashMap<>();
+        args.put("list", ensureHandle().toJson());
+        args.put("index", index);
+        Object result = getClient().invokeCapability("Aspire.Hosting/List.removeAt", args);
+        return Boolean.TRUE.equals(result);
+    }
+
+    /**
+     * Removes all elements from the list.
+     */
+    public void clear() {
+        getClient().invokeCapability("Aspire.Hosting/List.clear", Map.of("list", ensureHandle().toJson()));
+    }
+
+    /**
+     * Copies the list into a plain {@link List}. Later mutations of the underlying
+     * app model are not reflected in the returned copy.
+     *
+     * @return a snapshot of the list contents
+     */
+    @SuppressWarnings("unchecked")
+    public List<T> toList() {
+        Object result = getClient().invokeCapability("Aspire.Hosting/List.toArray", Map.of("list", ensureHandle().toJson()));
+        return (List<T>) result;
+    }
+}
+
+// ===== aspire/AspireRegistrations.java =====
+// AspireRegistrations.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.List;
+
+/** Static initializer to register handle wrappers. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class AspireRegistrations {
+    static {
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCallbackContext", (h, c) -> new TestCallbackContext(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestMutablePromiseCollisionResource", (h, c) -> new ITestMutablePromiseCollisionResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestResourceContext", (h, c) -> new TestResourceContext(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestEnvironmentContext", (h, c) -> new TestEnvironmentContext(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCollectionContext", (h, c) -> new TestCollectionContext(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestMutableCollectionContext", (h, c) -> new TestMutableCollectionContext(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestRedisResource", (h, c) -> new TestRedisResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestPromiseCollisionResource", (h, c) -> new ITestPromiseCollisionResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestPromiseCollisionResourcePromise", (h, c) -> new ITestPromiseCollisionResourcePromise(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestMutablePromiseCollisionResourcePromise", (h, c) -> new ITestMutablePromiseCollisionResourcePromise(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestDatabaseResource", (h, c) -> new TestDatabaseResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResource", (h, c) -> new IResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithConnectionString", (h, c) -> new IResourceWithConnectionString(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestVaultResource", (h, c) -> new ITestVaultResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestVaultResource", (h, c) -> new TestVaultResource(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.IDistributedApplicationBuilder", (h, c) -> new IDistributedApplicationBuilder(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithEnvironment", (h, c) -> new IResourceWithEnvironment(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/List<string>", (h, c) -> new AspireList<>(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Dict<string,string>", (h, c) -> new AspireDict<>(h, c));
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Dict<string,number>", (h, c) -> new AspireDict<>(h, c));
+    }
+
+    static void ensureRegistered() {
+        // Called to trigger static initializer
+    }
+}
+
+// ===== aspire/AspireUnion.java =====
+// AspireUnion.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/**
+ * Represents a runtime union value for generated Java APIs.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class AspireUnion {
+    private final Object value;
+
+    private AspireUnion(Object value) {
+        this.value = value;
+    }
+
+    public static AspireUnion of(Object value) {
+        return value instanceof AspireUnion union ? union : new AspireUnion(value);
+    }
+
+    public static AspireUnion fromValue(Object value) {
+        return of(value);
+    }
+
+    public Object getValue() {
+        return value;
+    }
+
+    public boolean is(Class<?> type) {
+        return value != null && type.isInstance(value);
+    }
+
+    public <T> T getValueAs(Class<T> type) {
+        if (value == null) {
+            return null;
+        }
+        if (!type.isInstance(value)) {
+            throw new IllegalStateException("Union value is of type " + value.getClass().getName() + ", not " + type.getName());
+        }
+        return type.cast(value);
+    }
+
+    @Override
+    public String toString() {
+        return "AspireUnion{" + value + "}";
+    }
+}
+
+// ===== aspire/BaseRegistrations.java =====
+// BaseRegistrations.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/**
+ * Registers runtime-owned wrappers defined in Base.java.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class BaseRegistrations {
+    private BaseRegistrations() {
+    }
+
+    static {
+        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.ReferenceExpression", ReferenceExpression::new);
+    }
+
+    static void ensureRegistered() {
+    }
+}
+
+// ===== aspire/CancellationToken.java =====
+// CancellationToken.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * CancellationToken for cancelling operations.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class CancellationToken {
+    private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private final AtomicInteger remoteReferences = new AtomicInteger(0);
+    private final Object cancellationLock = new Object();
+    private final List<Runnable> listeners = new ArrayList<>();
+
+    // Remote token id supplied by the AppHost when this token is materialized for a
+    // callback argument. Null for locally-created tokens. Retained so cancellation can
+    // be correlated back to the AppHost if needed.
+    private final String remoteTokenId;
+    private final AspireClient remoteClient;
+
+    public CancellationToken() {
+        this.remoteTokenId = null;
+        this.remoteClient = null;
+    }
+
+    CancellationToken(String remoteTokenId, AspireClient remoteClient) {
+        this.remoteTokenId = remoteTokenId;
+        this.remoteClient = remoteClient;
+    }
+
+    /**
+     * Materializes a cancellation token from a transport value sent by the AppHost.
+     * When the AppHost invokes a callback that accepts a CancellationToken it passes a
+     * remote token id (a string); generated code calls this to turn that wire value into
+     * a CancellationToken instance. Mirrors the TypeScript/Go SDK behavior.
+     */
+    public static CancellationToken fromValue(Object value) {
+        if (value instanceof CancellationToken token) {
+            return token;
+        }
+        if (value instanceof String tokenId) {
+            AspireClient client = AspireClient.currentCallbackClient();
+            return client == null
+                ? new CancellationToken(tokenId, null)
+                : client.getOrCreateRemoteCancellationToken(tokenId);
+        }
+        return new CancellationToken();
+    }
+
+    String getRemoteTokenId() { return remoteTokenId; }
+
+    void retainRemoteReference() {
+        remoteReferences.incrementAndGet();
+    }
+
+    void releaseRemoteReference() {
+        if (remoteTokenId != null && remoteClient != null) {
+            remoteClient.releaseRemoteCancellationToken(remoteTokenId, this);
+        }
+    }
+
+    int decrementRemoteReference() {
+        return remoteReferences.decrementAndGet();
+    }
+
+    public void cancel() {
+        if (!markCancelled()) {
+            return;
+        }
+
+        if (remoteTokenId != null && remoteClient != null) {
+            remoteClient.removeRemoteCancellationToken(remoteTokenId, this);
+        }
+
+        notifyCancellationListeners();
+    }
+
+    boolean markCancelled() {
+        synchronized (cancellationLock) {
+            return cancelled.compareAndSet(false, true);
+        }
+    }
+
+    void notifyCancellationListeners() {
+        List<Runnable> listenersToNotify;
+        synchronized (cancellationLock) {
+            listenersToNotify = new ArrayList<>(listeners);
+            listeners.clear();
+        }
+        RuntimeException listenerFailure = null;
+        for (Runnable listener : listenersToNotify) {
+            try {
+                listener.run();
+            } catch (RuntimeException exception) {
+                if (listenerFailure == null) {
+                    listenerFailure = exception;
+                } else if (listenerFailure != exception) {
+                    listenerFailure.addSuppressed(exception);
+                }
+            }
+        }
+        if (listenerFailure != null) {
+            throw listenerFailure;
+        }
+    }
+
+    public boolean isCancelled() { return cancelled.get(); }
+
+    public void onCancel(Runnable listener) {
+        synchronized (cancellationLock) {
+            if (!cancelled.get()) {
+                listeners.add(listener);
+                return;
+            }
+        }
+        listener.run();
+    }
+
+    void removeCancelListener(Runnable listener) {
+        synchronized (cancellationLock) {
+            listeners.remove(listener);
+        }
+    }
+
+}
+
+// ===== aspire/CapabilityError.java =====
+// CapabilityError.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/**
+ * CapabilityError represents an error from a capability invocation.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class CapabilityError extends RuntimeException {
+    private final String code;
+    private final Object data;
+
+    CapabilityError(String code, String message, Object data) {
+        super(message);
+        this.code = code;
+        this.data = data;
+    }
+
+    public String getCode() { return code; }
+    public Object getData() { return data; }
+}
+
+// ===== aspire/Handle.java =====
+// Handle.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Handle represents a remote object reference.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class Handle {
+    private final String id;
+    private final String typeId;
+
+    Handle(String id, String typeId) {
+        this.id = id;
+        this.typeId = typeId;
+    }
+
+    String getId() { return id; }
+    String getTypeId() { return typeId; }
+
+    Map<String, Object> toJson() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("$handle", id);
+        result.put("$type", typeId);
+        return result;
+    }
+
+    @Override
+    public String toString() {
+        return "Handle{id='" + id + "', typeId='" + typeId + "'}";
+    }
+}
+
+// ===== aspire/HandleWrapperBase.java =====
+// HandleWrapperBase.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/**
+ * HandleWrapperBase is the base class for all handle wrappers.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class HandleWrapperBase {
+    private final Handle handle;
+    private final AspireClient client;
+
+    HandleWrapperBase(Handle handle, AspireClient client) {
+        this.handle = handle;
+        this.client = client;
+    }
+
+    Handle getHandle() {
+        return handle;
+    }
+
+    AspireClient getClient() {
+        return client;
+    }
+}
+
+// ===== aspire/IDistributedApplicationBuilder.java =====
+// IDistributedApplicationBuilder.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting/Aspire.Hosting.IDistributedApplicationBuilder. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class IDistributedApplicationBuilder extends HandleWrapperBase {
+    IDistributedApplicationBuilder(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    public TestRedisResource addTestRedis(String name) {
+        return addTestRedis(name, null);
+    }
+
+    /** Adds a test Redis resource from ATS documentation. */
+    public TestRedisResource addTestRedis(String name, Number port) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("name", AspireClient.serializeValue(name));
+        if (port != null) {
+            reqArgs.put("port", AspireClient.serializeValue(port));
+        }
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestRedis", reqArgs);
+        return (TestRedisResource) result;
+    }
+
+    /** Adds a test vault resource */
+    public ITestVaultResource addTestVault(String name) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("name", AspireClient.serializeValue(name));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestVault", reqArgs);
+        return (ITestVaultResource) result;
+    }
+
+}
+
+// ===== aspire/IResource.java =====
+// IResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResource. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class IResource extends ResourceBuilderBase {
+    IResource(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/IResourceWithConnectionString.java =====
+// IResourceWithConnectionString.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithConnectionString. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class IResourceWithConnectionString extends ResourceBuilderBase {
+    IResourceWithConnectionString(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/IResourceWithEnvironment.java =====
+// IResourceWithEnvironment.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithEnvironment. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class IResourceWithEnvironment extends HandleWrapperBase {
+    IResourceWithEnvironment(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/ITestMutablePromiseCollisionResource.java =====
+// ITestMutablePromiseCollisionResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestMutablePromiseCollisionResource. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ITestMutablePromiseCollisionResource extends ResourceBuilderBase {
+    ITestMutablePromiseCollisionResource(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** Gets or sets the test value. */
+    public String value() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/ITestMutablePromiseCollisionResource.value", reqArgs);
+        return (String) result;
+    }
+
+    /** Sets the Value property */
+    public ITestMutablePromiseCollisionResource setValue(String value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/ITestMutablePromiseCollisionResource.setValue", reqArgs);
+        return (ITestMutablePromiseCollisionResource) result;
+    }
+
+}
+
+// ===== aspire/ITestMutablePromiseCollisionResourcePromise.java =====
+// ITestMutablePromiseCollisionResourcePromise.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestMutablePromiseCollisionResourcePromise. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ITestMutablePromiseCollisionResourcePromise extends ResourceBuilderBase {
+    ITestMutablePromiseCollisionResourcePromise(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/ITestPromiseCollisionResource.java =====
+// ITestPromiseCollisionResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestPromiseCollisionResource. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ITestPromiseCollisionResource extends ResourceBuilderBase {
+    ITestPromiseCollisionResource(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/ITestPromiseCollisionResourcePromise.java =====
+// ITestPromiseCollisionResourcePromise.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestPromiseCollisionResourcePromise. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ITestPromiseCollisionResourcePromise extends ResourceBuilderBase {
+    ITestPromiseCollisionResourcePromise(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/ITestVaultResource.java =====
+// ITestVaultResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestVaultResource. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ITestVaultResource extends ResourceBuilderBase {
+    ITestVaultResource(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+}
+
+// ===== aspire/JsonSerializable.java =====
+// JsonSerializable.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.Map;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+public interface JsonSerializable {
+    Map<String, Object> toMap();
+}
+
+// ===== aspire/ReferenceExpression.java =====
+// ReferenceExpression.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * ReferenceExpression represents a reference expression.
+ * Supports value mode (format + value providers), conditional mode, and handle mode.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ReferenceExpression {
+    private final String format;
+    private final Object[] valueProviders;
+    private final Object condition;
+    private final ReferenceExpression whenTrue;
+    private final ReferenceExpression whenFalse;
+    private final String matchValue;
+    private final Handle handle;
+    private final AspireClient client;
+
+    ReferenceExpression(String format, Object... valueProviders) {
+        this.format = format;
+        this.valueProviders = valueProviders;
+        this.condition = null;
+        this.whenTrue = null;
+        this.whenFalse = null;
+        this.matchValue = null;
+        this.handle = null;
+        this.client = null;
+    }
+
+    private ReferenceExpression(Object condition, String matchValue, ReferenceExpression whenTrue, ReferenceExpression whenFalse) {
+        this.format = null;
+        this.valueProviders = null;
+        this.condition = condition;
+        this.whenTrue = whenTrue;
+        this.whenFalse = whenFalse;
+        this.matchValue = matchValue != null ? matchValue : "True";
+        this.handle = null;
+        this.client = null;
+    }
+
+    ReferenceExpression(Handle handle, AspireClient client) {
+        this.format = null;
+        this.valueProviders = null;
+        this.condition = null;
+        this.whenTrue = null;
+        this.whenFalse = null;
+        this.matchValue = null;
+        this.handle = handle;
+        this.client = client;
+    }
+
+    boolean isConditional() {
+        return condition != null;
+    }
+
+    boolean isHandle() {
+        return handle != null;
+    }
+
+    Map<String, Object> toJson() {
+        if (handle != null) {
+            return handle.toJson();
+        }
+
+        Map<String, Object> expression = new HashMap<>();
+        if (isConditional()) {
+            expression.put("condition", extractValueProvider(condition));
+            expression.put("whenTrue", whenTrue.toJson());
+            expression.put("whenFalse", whenFalse.toJson());
+            expression.put("matchValue", matchValue);
+        } else {
+            expression.put("format", format);
+            if (valueProviders != null && valueProviders.length > 0) {
+                List<Object> providers = new ArrayList<>(valueProviders.length);
+                for (Object valueProvider : valueProviders) {
+                    providers.add(extractValueProvider(valueProvider));
+                }
+                expression.put("valueProviders", providers);
+            }
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("$expr", expression);
+        return result;
+    }
+
+    public String getValue() {
+        return getValue(null);
+    }
+
+    public String getValue(CancellationToken cancellationToken) {
+        if (handle == null || client == null) {
+            throw new IllegalStateException("getValue is only available on server-returned ReferenceExpression instances");
+        }
+
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(handle));
+        if (cancellationToken != null) {
+            reqArgs.put("cancellationToken", cancellationToken);
+        }
+
+        return (String) client.invokeCapability("Aspire.Hosting.ApplicationModel/getValue", reqArgs);
+    }
+
+    public static ReferenceExpression refExpr(String format, Object... valueProviders) {
+        return new ReferenceExpression(format, valueProviders);
+    }
+
+    public static ReferenceExpression createConditional(Object condition, String matchValue, ReferenceExpression whenTrue, ReferenceExpression whenFalse) {
+        return new ReferenceExpression(condition, matchValue, whenTrue, whenFalse);
+    }
+
+    private static Object extractValueProvider(Object value) {
+        if (value == null) {
+            throw new IllegalArgumentException("Cannot use null in a reference expression");
+        }
+
+        if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+            return value;
+        }
+
+        return AspireClient.serializeValue(value);
+    }
+}
+
+// ===== aspire/ResourceBuilderBase.java =====
+// ResourceBuilderBase.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/**
+ * ResourceBuilderBase extends HandleWrapperBase for resource builders.
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class ResourceBuilderBase extends HandleWrapperBase {
+    ResourceBuilderBase(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+}
+
+// ===== aspire/TestCallbackContext.java =====
+// TestCallbackContext.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCallbackContext. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestCallbackContext extends HandleWrapperBase {
+    TestCallbackContext(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** Gets the Name property */
+    public String name() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.name", reqArgs);
+        return result == null ? null : (String) result;
+    }
+
+    /** Sets the Name property */
+    public TestCallbackContext setName(String value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setName", reqArgs);
+        return (TestCallbackContext) result;
+    }
+
+    /** Gets the Value property */
+    public double value() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.value", reqArgs);
+        return ((Number) result).doubleValue();
+    }
+
+    /** Sets the Value property */
+    public TestCallbackContext setValue(double value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setValue", reqArgs);
+        return (TestCallbackContext) result;
+    }
+
+    /** CancellationToken is supported by ATS. */
+    public CancellationToken cancellationToken() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.cancellationToken", reqArgs);
+        return (CancellationToken) result;
+    }
+
+    /** Sets the CancellationToken property */
+    public TestCallbackContext setCancellationToken(CancellationToken value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        if (value != null) {
+            reqArgs.put("value", value);
+        }
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setCancellationToken", reqArgs);
+        return (TestCallbackContext) result;
+    }
+
+}
+
+// ===== aspire/TestCollectionContext.java =====
+// TestCollectionContext.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.List;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCollectionContext. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestCollectionContext extends HandleWrapperBase {
+    TestCollectionContext(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** List property - should generate AspireList getter like Dictionary properties. */
+    private AspireList<String> itemsField;
+    public AspireList<String> items() {
+        if (itemsField == null) {
+            itemsField = new AspireList<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCollectionContext.items");
+        }
+        return itemsField;
+    }
+
+    /** Dictionary property - already works with AspireDict getter. */
+    private AspireDict<String, String> metadataField;
+    public AspireDict<String, String> metadata() {
+        if (metadataField == null) {
+            metadataField = new AspireDict<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCollectionContext.metadata");
+        }
+        return metadataField;
+    }
+
+}
+
+// ===== aspire/TestConfigDto.java =====
+// TestConfigDto.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** TestConfigDto DTO. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestConfigDto implements JsonSerializable {
+    private String name;
+    private double port;
+    private boolean enabled;
+    private String optionalField;
+
+    public String getName() { return name; }
+    public void setName(String value) { this.name = value; }
+    public double getPort() { return port; }
+    public void setPort(double value) { this.port = value; }
+    public boolean getEnabled() { return enabled; }
+    public void setEnabled(boolean value) { this.enabled = value; }
+    public String getOptionalField() { return optionalField; }
+    public void setOptionalField(String value) { this.optionalField = value; }
+
+    @SuppressWarnings("unchecked")
+    public static TestConfigDto fromMap(Map<String, Object> map) {
+        var value = new TestConfigDto();
+        var nameValue = map.get("Name");
+        value.setName((String) nameValue);
+        var portValue = map.get("Port");
+        value.setPort(((Number) portValue).doubleValue());
+        var enabledValue = map.get("Enabled");
+        value.setEnabled((Boolean) enabledValue);
+        var optionalFieldValue = map.get("OptionalField");
+        value.setOptionalField(optionalFieldValue == null ? null : (String) optionalFieldValue);
+        return value;
+    }
+
+    public Map<String, Object> toMap() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("Name", AspireClient.serializeValue(name));
+        map.put("Port", AspireClient.serializeValue(port));
+        map.put("Enabled", AspireClient.serializeValue(enabled));
+        map.put("OptionalField", AspireClient.serializeValue(optionalField));
+        return map;
+    }
+}
+
+// ===== aspire/TestConfigs.java =====
+// TestConfigs.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class TestConfigs {
+    private TestConfigs() { }
+
+    public static final TestConfigDto Default = new TestConfigDto() {{ setName("default"); setPort(6379); setEnabled(true); setOptionalField("cache"); }};
+
+    public static final class Profiles {
+        private Profiles() { }
+
+        public static final TestConfigDto Development = new TestConfigDto() {{ setName("development"); setPort(5001); setEnabled(false); setOptionalField(null); }};
+
+    }
+
+    public static final TestConfigDto Secure = new TestConfigDto() {{ setName("secure"); setPort(6380); setEnabled(true); setOptionalField(null); }};
+
+    public static final String UnicodeGreeting = "你好こんにちは";
+
+}
+
+// ===== aspire/TestDatabaseResource.java =====
+// TestDatabaseResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestDatabaseResource. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestDatabaseResource extends ResourceBuilderBase {
+    TestDatabaseResource(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** Adds an optional string parameter */
+    public TestDatabaseResource withOptionalString(WithOptionalStringOptions optionsBag) {
+        var value = optionsBag == null ? null : optionsBag.getValue();
+        var enabled = optionsBag == null ? null : optionsBag.getEnabled();
+        return withOptionalStringImpl(value, enabled);
+    }
+
+    public TestDatabaseResource withOptionalString() {
+        return withOptionalString(null);
+    }
+
+    /** Adds an optional string parameter */
+    private TestDatabaseResource withOptionalStringImpl(String value, Boolean enabled) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        if (value != null) {
+            reqArgs.put("value", AspireClient.serializeValue(value));
+        }
+        if (enabled != null) {
+            reqArgs.put("enabled", AspireClient.serializeValue(enabled));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
+        return this;
+    }
+
+    /** Configures the resource with a DTO */
+    public TestDatabaseResource withConfig(TestConfigDto config) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("config", AspireClient.serializeValue(config));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
+        return this;
+    }
+
+    /** Configures environment with callback (test version) */
+    public TestDatabaseResource testWithEnvironmentCallback(AspireAction1<TestEnvironmentContext> callback) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        var callbackId = getClient().registerCallback(args -> {
+            var arg = (TestEnvironmentContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
+        return this;
+    }
+
+    /** Sets the created timestamp */
+    public TestDatabaseResource withCreatedAt(String createdAt) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("createdAt", AspireClient.serializeValue(createdAt));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
+        return this;
+    }
+
+    /** Sets the modified timestamp */
+    public TestDatabaseResource withModifiedAt(String modifiedAt) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("modifiedAt", AspireClient.serializeValue(modifiedAt));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
+        return this;
+    }
+
+    /** Sets the correlation ID */
+    public TestDatabaseResource withCorrelationId(String correlationId) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("correlationId", AspireClient.serializeValue(correlationId));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
+        return this;
+    }
+
+    public TestDatabaseResource withOptionalCallback() {
+        return withOptionalCallback(null);
+    }
+
+    /** Configures with optional callback */
+    public TestDatabaseResource withOptionalCallback(AspireAction1<TestCallbackContext> callback) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        var callbackId = callback == null ? null : getClient().registerCallback(args -> {
+            var arg = (TestCallbackContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
+        return this;
+    }
+
+    /** Sets the resource status */
+    public TestDatabaseResource withStatus(TestResourceStatus status) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("status", AspireClient.serializeValue(status));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
+        return this;
+    }
+
+    /** Configures with nested DTO */
+    public TestDatabaseResource withNestedConfig(TestNestedDto config) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("config", AspireClient.serializeValue(config));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
+        return this;
+    }
+
+    /** Adds validation callback */
+    public TestDatabaseResource withValidator(AspireFunc1<TestResourceContext, Boolean> validator) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        var validatorId = getClient().registerCallback(args -> {
+            var arg = (TestResourceContext) args[0];
+            return AspireClient.awaitValue(validator.invoke(arg));
+        });
+        if (validatorId != null) {
+            reqArgs.put("validator", validatorId);
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
+        return this;
+    }
+
+    /** Waits for another resource (test version) */
+    public TestDatabaseResource testWaitFor(IResource dependency) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
+        return this;
+    }
+
+    public TestDatabaseResource testWaitFor(ResourceBuilderBase dependency) {
+        return testWaitFor(new IResource(dependency.getHandle(), dependency.getClient()));
+    }
+
+    /** Adds a dependency on another resource */
+    public TestDatabaseResource withDependency(IResourceWithConnectionString dependency) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
+        return this;
+    }
+
+    public TestDatabaseResource withDependency(ResourceBuilderBase dependency) {
+        return withDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    public TestDatabaseResource withUnionDependency(String dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestDatabaseResource withUnionDependency(IResourceWithConnectionString dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestDatabaseResource withUnionDependency(ResourceBuilderBase dependency) {
+        return withUnionDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    /** Adds a dependency from a string or another resource */
+    public TestDatabaseResource withUnionDependency(AspireUnion dependency) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withUnionDependency", reqArgs);
+        return this;
+    }
+
+    /** Sets the endpoints */
+    public TestDatabaseResource withEndpoints(String[] endpoints) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpoints", AspireClient.serializeValue(endpoints));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
+        return this;
+    }
+
+    /** Sets environment variables */
+    public TestDatabaseResource withEnvironmentVariables(Map<String, String> variables) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("variables", AspireClient.serializeValue(variables));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
+        return this;
+    }
+
+    /** Performs a cancellable operation */
+    public TestDatabaseResource withCancellableOperation(AspireAction1<CancellationToken> operation) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        var operationId = getClient().registerCallback(args -> {
+            var arg = CancellationToken.fromValue(args[0]);
+            operation.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (operationId != null) {
+            reqArgs.put("operation", operationId);
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
+        return this;
+    }
+
+    /** Adds a data volume */
+    public TestDatabaseResource withDataVolume(WithDataVolumeOptions optionsBag) {
+        var name = optionsBag == null ? null : optionsBag.getName();
+        return withDataVolumeImpl(name);
+    }
+
+    public TestDatabaseResource withDataVolume() {
+        return withDataVolume(null);
+    }
+
+    /** Adds a data volume */
+    private TestDatabaseResource withDataVolumeImpl(String name) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        if (name != null) {
+            reqArgs.put("name", AspireClient.serializeValue(name));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDataVolume", reqArgs);
+        return this;
+    }
+
+    /** Adds a label to the resource */
+    public TestDatabaseResource withMergeLabel(String label) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabel", reqArgs);
+        return this;
+    }
+
+    /** Adds a categorized label to the resource */
+    public TestDatabaseResource withMergeLabelCategorized(String label, String category) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        reqArgs.put("category", AspireClient.serializeValue(category));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabelCategorized", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint */
+    public TestDatabaseResource withMergeEndpoint(String endpointName, double port) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpoint", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint with scheme */
+    public TestDatabaseResource withMergeEndpointScheme(String endpointName, double port, String scheme) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        reqArgs.put("scheme", AspireClient.serializeValue(scheme));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpointScheme", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging */
+    public TestDatabaseResource withMergeLogging(String logLevel, WithMergeLoggingOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingImpl(logLevel, enableConsole, maxFiles);
+    }
+
+    public TestDatabaseResource withMergeLogging(String logLevel) {
+        return withMergeLogging(logLevel, null);
+    }
+
+    /** Configures resource logging */
+    private TestDatabaseResource withMergeLoggingImpl(String logLevel, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLogging", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging with file path */
+    public TestDatabaseResource withMergeLoggingPath(String logLevel, String logPath, WithMergeLoggingPathOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingPathImpl(logLevel, logPath, enableConsole, maxFiles);
+    }
+
+    public TestDatabaseResource withMergeLoggingPath(String logLevel, String logPath) {
+        return withMergeLoggingPath(logLevel, logPath, null);
+    }
+
+    /** Configures resource logging with file path */
+    private TestDatabaseResource withMergeLoggingPathImpl(String logLevel, String logPath, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        reqArgs.put("logPath", AspireClient.serializeValue(logPath));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLoggingPath", reqArgs);
+        return this;
+    }
+
+    /** Configures a route */
+    public TestDatabaseResource withMergeRoute(String path, String method, String handler, double priority) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRoute", reqArgs);
+        return this;
+    }
+
+    /** Configures a route with middleware */
+    public TestDatabaseResource withMergeRouteMiddleware(String path, String method, String handler, double priority, String middleware) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        reqArgs.put("middleware", AspireClient.serializeValue(middleware));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRouteMiddleware", reqArgs);
+        return this;
+    }
+
+}
+
+// ===== aspire/TestDeeplyNestedDto.java =====
+// TestDeeplyNestedDto.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/** TestDeeplyNestedDto DTO. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestDeeplyNestedDto implements JsonSerializable {
+    private Map<String, List<TestConfigDto>> nestedData;
+    private Map<String, String>[] metadataArray;
+
+    public Map<String, List<TestConfigDto>> getNestedData() { return nestedData; }
+    public void setNestedData(Map<String, List<TestConfigDto>> value) { this.nestedData = value; }
+    public Map<String, String>[] getMetadataArray() { return metadataArray; }
+    public void setMetadataArray(Map<String, String>[] value) { this.metadataArray = value; }
+
+    @SuppressWarnings("unchecked")
+    public static TestDeeplyNestedDto fromMap(Map<String, Object> map) {
+        var value = new TestDeeplyNestedDto();
+        var nestedDataValue = map.get("NestedData");
+        value.setNestedData((Map<String, List<TestConfigDto>>) nestedDataValue);
+        var metadataArrayValue = map.get("MetadataArray");
+        value.setMetadataArray((Map<String, String>[]) AspireClient.convertArray(metadataArrayValue, Map[].class.getComponentType(), item0 -> (Map<String, String>) item0));
+        return value;
+    }
+
+    public Map<String, Object> toMap() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("NestedData", AspireClient.serializeValue(nestedData));
+        map.put("MetadataArray", AspireClient.serializeValue(metadataArray));
+        return map;
+    }
+}
+
+// ===== aspire/TestEnvironmentContext.java =====
+// TestEnvironmentContext.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestEnvironmentContext. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestEnvironmentContext extends HandleWrapperBase {
+    TestEnvironmentContext(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** Gets the Name property */
+    public String name() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.name", reqArgs);
+        return (String) result;
+    }
+
+    /** Sets the Name property */
+    public TestEnvironmentContext setName(String value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setName", reqArgs);
+        return (TestEnvironmentContext) result;
+    }
+
+    /** Gets the Description property */
+    public String description() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.description", reqArgs);
+        return result == null ? null : (String) result;
+    }
+
+    /** Sets the Description property */
+    public TestEnvironmentContext setDescription(String value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setDescription", reqArgs);
+        return (TestEnvironmentContext) result;
+    }
+
+    /** Gets the Priority property */
+    public double priority() {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.priority", reqArgs);
+        return ((Number) result).doubleValue();
+    }
+
+    /** Sets the Priority property */
+    public TestEnvironmentContext setPriority(double value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setPriority", reqArgs);
+        return (TestEnvironmentContext) result;
+    }
+
+}
+
+// ===== aspire/TestMutableCollectionContext.java =====
+// TestMutableCollectionContext.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestMutableCollectionContext. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestMutableCollectionContext extends HandleWrapperBase {
+    TestMutableCollectionContext(Handle handle, AspireClient client) {
+        super(handle, client);
+    }
+
+    /** Gets the Tags property */
+    private AspireList<String> tagsField;
+    public AspireList<String> tags() {
+        if (tagsField == null) {
+            tagsField = new AspireList<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestMutableCollectionContext.tags");
+        }
+        return tagsField;
+    }
+
+    /** Sets the Tags property */
+    public TestMutableCollectionContext setTags(AspireList<String> value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestMutableCollectionContext.setTags", reqArgs);
+        return (TestMutableCollectionContext) result;
+    }
+
+    /** Gets the Counts property */
+    private AspireDict<String, Number> countsField;
+    public AspireDict<String, Number> counts() {
+        if (countsField == null) {
+            countsField = new AspireDict<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestMutableCollectionContext.counts");
+        }
+        return countsField;
+    }
+
+    /** Sets the Counts property */
+    public TestMutableCollectionContext setCounts(AspireDict<String, Number> value) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("value", AspireClient.serializeValue(value));
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestMutableCollectionContext.setCounts", reqArgs);
+        return (TestMutableCollectionContext) result;
+    }
+
+}
+
+// ===== aspire/TestNestedDto.java =====
+// TestNestedDto.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/** TestNestedDto DTO. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestNestedDto implements JsonSerializable {
+    private String id;
+    private TestConfigDto config;
+    private List<String> tags;
+    private Map<String, Number> counts;
+
+    public String getId() { return id; }
+    public void setId(String value) { this.id = value; }
+    public TestConfigDto getConfig() { return config; }
+    public void setConfig(TestConfigDto value) { this.config = value; }
+    public List<String> getTags() { return tags; }
+    public void setTags(List<String> value) { this.tags = value; }
+    public Map<String, Number> getCounts() { return counts; }
+    public void setCounts(Map<String, Number> value) { this.counts = value; }
+
+    @SuppressWarnings("unchecked")
+    public static TestNestedDto fromMap(Map<String, Object> map) {
+        var value = new TestNestedDto();
+        var idValue = map.get("Id");
+        value.setId((String) idValue);
+        var configValue = map.get("Config");
+        value.setConfig(configValue == null ? null : TestConfigDto.fromMap((Map<String, Object>) configValue));
+        var tagsValue = map.get("Tags");
+        value.setTags(((List<Object>) tagsValue).stream().map(item0 -> (String) item0).toList());
+        var countsValue = map.get("Counts");
+        value.setCounts((Map<String, Number>) countsValue);
+        return value;
+    }
+
+    public Map<String, Object> toMap() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("Id", AspireClient.serializeValue(id));
+        map.put("Config", AspireClient.serializeValue(config));
+        map.put("Tags", AspireClient.serializeValue(tags));
+        map.put("Counts", AspireClient.serializeValue(counts));
+        return map;
+    }
+}
+
+// ===== aspire/TestPersistenceMode.java =====
+// TestPersistenceMode.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
 
 /** TestPersistenceMode enum. */
-enum TestPersistenceMode {
+@SuppressWarnings({"all", "unchecked", "serial"})
+public enum TestPersistenceMode implements WireValueEnum {
     NONE("None"),
     VOLUME("Volume"),
     BIND("Bind");
@@ -32,445 +3106,67 @@ enum TestPersistenceMode {
     }
 }
 
-/** TestResourceStatus enum. */
-enum TestResourceStatus {
-    PENDING("Pending"),
-    RUNNING("Running"),
-    STOPPED("Stopped"),
-    FAILED("Failed");
+// ===== aspire/TestRedisResource.java =====
+// TestRedisResource.java - GENERATED CODE - DO NOT EDIT
 
-    private final String value;
+package aspire;
 
-    TestResourceStatus(String value) {
-        this.value = value;
-    }
-
-    public String getValue() { return value; }
-
-    public static TestResourceStatus fromValue(String value) {
-        for (TestResourceStatus e : values()) {
-            if (e.value.equals(value)) return e;
-        }
-        throw new IllegalArgumentException("Unknown value: " + value);
-    }
-}
-
-// ============================================================================
-// DTOs
-// ============================================================================
-
-/** TestConfigDto DTO. */
-class TestConfigDto {
-    private String name;
-    private double port;
-    private boolean enabled;
-    private String optionalField;
-
-    public String getName() { return name; }
-    public void setName(String value) { this.name = value; }
-    public double getPort() { return port; }
-    public void setPort(double value) { this.port = value; }
-    public boolean getEnabled() { return enabled; }
-    public void setEnabled(boolean value) { this.enabled = value; }
-    public String getOptionalField() { return optionalField; }
-    public void setOptionalField(String value) { this.optionalField = value; }
-
-    public Map<String, Object> toMap() {
-        Map<String, Object> map = new HashMap<>();
-        map.put("Name", AspireClient.serializeValue(name));
-        map.put("Port", AspireClient.serializeValue(port));
-        map.put("Enabled", AspireClient.serializeValue(enabled));
-        map.put("OptionalField", AspireClient.serializeValue(optionalField));
-        return map;
-    }
-}
-
-/** TestNestedDto DTO. */
-class TestNestedDto {
-    private String id;
-    private TestConfigDto config;
-    private AspireList<String> tags;
-    private AspireDict<String, double> counts;
-
-    public String getId() { return id; }
-    public void setId(String value) { this.id = value; }
-    public TestConfigDto getConfig() { return config; }
-    public void setConfig(TestConfigDto value) { this.config = value; }
-    public AspireList<String> getTags() { return tags; }
-    public void setTags(AspireList<String> value) { this.tags = value; }
-    public AspireDict<String, double> getCounts() { return counts; }
-    public void setCounts(AspireDict<String, double> value) { this.counts = value; }
-
-    public Map<String, Object> toMap() {
-        Map<String, Object> map = new HashMap<>();
-        map.put("Id", AspireClient.serializeValue(id));
-        map.put("Config", AspireClient.serializeValue(config));
-        map.put("Tags", AspireClient.serializeValue(tags));
-        map.put("Counts", AspireClient.serializeValue(counts));
-        return map;
-    }
-}
-
-/** TestDeeplyNestedDto DTO. */
-class TestDeeplyNestedDto {
-    private AspireDict<String, AspireList<TestConfigDto>> nestedData;
-    private AspireDict<String, String>[] metadataArray;
-
-    public AspireDict<String, AspireList<TestConfigDto>> getNestedData() { return nestedData; }
-    public void setNestedData(AspireDict<String, AspireList<TestConfigDto>> value) { this.nestedData = value; }
-    public AspireDict<String, String>[] getMetadataArray() { return metadataArray; }
-    public void setMetadataArray(AspireDict<String, String>[] value) { this.metadataArray = value; }
-
-    public Map<String, Object> toMap() {
-        Map<String, Object> map = new HashMap<>();
-        map.put("NestedData", AspireClient.serializeValue(nestedData));
-        map.put("MetadataArray", AspireClient.serializeValue(metadataArray));
-        return map;
-    }
-}
-
-// ============================================================================
-// Handle Wrappers
-// ============================================================================
-
-/** Wrapper for Aspire.Hosting/Aspire.Hosting.IDistributedApplicationBuilder. */
-class IDistributedApplicationBuilder extends HandleWrapperBase {
-    IDistributedApplicationBuilder(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-    /** Adds a test Redis resource */
-    public TestRedisResource addTestRedis(String name, Double port) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("name", AspireClient.serializeValue(name));
-        if (port != null) {
-            reqArgs.put("port", AspireClient.serializeValue(port));
-        }
-        return (TestRedisResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestRedis", reqArgs);
-    }
-
-    /** Adds a test vault resource */
-    public TestVaultResource addTestVault(String name) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("name", AspireClient.serializeValue(name));
-        return (TestVaultResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestVault", reqArgs);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResource. */
-class IResource extends ResourceBuilderBase {
-    IResource(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithConnectionString. */
-class IResourceWithConnectionString extends ResourceBuilderBase {
-    IResourceWithConnectionString(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithEnvironment. */
-class IResourceWithEnvironment extends HandleWrapperBase {
-    IResourceWithEnvironment(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestVaultResource. */
-class ITestVaultResource extends ResourceBuilderBase {
-    ITestVaultResource(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCallbackContext. */
-class TestCallbackContext extends HandleWrapperBase {
-    TestCallbackContext(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-    /** Gets the Name property */
-    public String name() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.name", reqArgs);
-    }
-
-    /** Sets the Name property */
-    public TestCallbackContext setName(String value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestCallbackContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setName", reqArgs);
-    }
-
-    /** Gets the Value property */
-    public double value() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (double) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.value", reqArgs);
-    }
-
-    /** Sets the Value property */
-    public TestCallbackContext setValue(double value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestCallbackContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setValue", reqArgs);
-    }
-
-    /** Gets the CancellationToken property */
-    public CancellationToken cancellationToken() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (CancellationToken) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.cancellationToken", reqArgs);
-    }
-
-    /** Sets the CancellationToken property */
-    public TestCallbackContext setCancellationToken(CancellationToken value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        if (value != null) {
-            reqArgs.put("value", getClient().registerCancellation(value));
-        }
-        return (TestCallbackContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCallbackContext.setCancellationToken", reqArgs);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCollectionContext. */
-class TestCollectionContext extends HandleWrapperBase {
-    TestCollectionContext(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-    /** Gets the Items property */
-    private AspireList<String> itemsField;
-    public AspireList<String> items() {
-        if (itemsField == null) {
-            itemsField = new AspireList<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCollectionContext.items");
-        }
-        return itemsField;
-    }
-
-    /** Gets the Metadata property */
-    private AspireDict<String, String> metadataField;
-    public AspireDict<String, String> metadata() {
-        if (metadataField == null) {
-            metadataField = new AspireDict<>(getHandle(), getClient(), "Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestCollectionContext.metadata");
-        }
-        return metadataField;
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestDatabaseResource. */
-class TestDatabaseResource extends ResourceBuilderBase {
-    TestDatabaseResource(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-    /** Adds an optional string parameter */
-    public IResource withOptionalString(String value, Boolean enabled) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (value != null) {
-            reqArgs.put("value", AspireClient.serializeValue(value));
-        }
-        if (enabled != null) {
-            reqArgs.put("enabled", AspireClient.serializeValue(enabled));
-        }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
-    }
-
-    /** Configures the resource with a DTO */
-    public IResource withConfig(TestConfigDto config) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
-    }
-
-    /** Configures environment with callback (test version) */
-    public IResourceWithEnvironment testWithEnvironmentCallback(Function<Object[], Object> callback) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
-        }
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
-    }
-
-    /** Sets the created timestamp */
-    public IResource withCreatedAt(String createdAt) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("createdAt", AspireClient.serializeValue(createdAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
-    }
-
-    /** Sets the modified timestamp */
-    public IResource withModifiedAt(String modifiedAt) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("modifiedAt", AspireClient.serializeValue(modifiedAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
-    }
-
-    /** Sets the correlation ID */
-    public IResource withCorrelationId(String correlationId) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("correlationId", AspireClient.serializeValue(correlationId));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
-    }
-
-    /** Configures with optional callback */
-    public IResource withOptionalCallback(Function<Object[], Object> callback) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
-        }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
-    }
-
-    /** Sets the resource status */
-    public IResource withStatus(TestResourceStatus status) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("status", AspireClient.serializeValue(status));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
-    }
-
-    /** Configures with nested DTO */
-    public IResource withNestedConfig(TestNestedDto config) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
-    }
-
-    /** Adds validation callback */
-    public IResource withValidator(Function<Object[], Object> validator) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (validator != null) {
-            reqArgs.put("validator", getClient().registerCallback(validator));
-        }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
-    }
-
-    /** Waits for another resource (test version) */
-    public IResource testWaitFor(IResource dependency) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
-    }
-
-    /** Adds a dependency on another resource */
-    public IResource withDependency(IResourceWithConnectionString dependency) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
-    }
-
-    /** Sets the endpoints */
-    public IResource withEndpoints(String[] endpoints) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("endpoints", AspireClient.serializeValue(endpoints));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
-    }
-
-    /** Sets environment variables */
-    public IResourceWithEnvironment withEnvironmentVariables(Map<String, String> variables) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("variables", AspireClient.serializeValue(variables));
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
-    }
-
-    /** Performs a cancellable operation */
-    public IResource withCancellableOperation(Function<Object[], Object> operation) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (operation != null) {
-            reqArgs.put("operation", getClient().registerCallback(operation));
-        }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
-    }
-
-}
-
-/** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestEnvironmentContext. */
-class TestEnvironmentContext extends HandleWrapperBase {
-    TestEnvironmentContext(Handle handle, AspireClient client) {
-        super(handle, client);
-    }
-
-    /** Gets the Name property */
-    public String name() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.name", reqArgs);
-    }
-
-    /** Sets the Name property */
-    public TestEnvironmentContext setName(String value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestEnvironmentContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setName", reqArgs);
-    }
-
-    /** Gets the Description property */
-    public String description() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.description", reqArgs);
-    }
-
-    /** Sets the Description property */
-    public TestEnvironmentContext setDescription(String value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestEnvironmentContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setDescription", reqArgs);
-    }
-
-    /** Gets the Priority property */
-    public double priority() {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (double) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.priority", reqArgs);
-    }
-
-    /** Sets the Priority property */
-    public TestEnvironmentContext setPriority(double value) {
-        Map<String, Object> reqArgs = new HashMap<>();
-        reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestEnvironmentContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestEnvironmentContext.setPriority", reqArgs);
-    }
-
-}
+import java.util.HashMap;
+import java.util.Map;
 
 /** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestRedisResource. */
-class TestRedisResource extends ResourceBuilderBase {
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestRedisResource extends ResourceBuilderBase {
     TestRedisResource(Handle handle, AspireClient client) {
         super(handle, client);
+    }
+
+    /** Configures a Redis resource with parameter-only resources whose generated names collide. */
+    public TestRedisResource withPromiseCollisionResources(ITestPromiseCollisionResource resource, ITestPromiseCollisionResourcePromise resourcePromise) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("resource", AspireClient.serializeValue(resource));
+        reqArgs.put("resourcePromise", AspireClient.serializeValue(resourcePromise));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withPromiseCollisionResources", reqArgs);
+        return this;
+    }
+
+    public TestRedisResource withPromiseCollisionResources(ResourceBuilderBase resource, ITestPromiseCollisionResourcePromise resourcePromise) {
+        return withPromiseCollisionResources(new ITestPromiseCollisionResource(resource.getHandle(), resource.getClient()), resourcePromise);
+    }
+
+    public TestRedisResource withPromiseCollisionResources(ITestPromiseCollisionResource resource, ResourceBuilderBase resourcePromise) {
+        return withPromiseCollisionResources(resource, new ITestPromiseCollisionResourcePromise(resourcePromise.getHandle(), resourcePromise.getClient()));
+    }
+
+    public TestRedisResource withPromiseCollisionResources(ResourceBuilderBase resource, ResourceBuilderBase resourcePromise) {
+        return withPromiseCollisionResources(new ITestPromiseCollisionResource(resource.getHandle(), resource.getClient()), new ITestPromiseCollisionResourcePromise(resourcePromise.getHandle(), resourcePromise.getClient()));
+    }
+
+    /** Configures a Redis resource with mutable-property and parameter-only resources whose generated names collide. */
+    public TestRedisResource withMutablePromiseCollisionResources(ITestMutablePromiseCollisionResource resource, ITestMutablePromiseCollisionResourcePromise resourcePromise) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("resource", AspireClient.serializeValue(resource));
+        reqArgs.put("resourcePromise", AspireClient.serializeValue(resourcePromise));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMutablePromiseCollisionResources", reqArgs);
+        return this;
+    }
+
+    public TestRedisResource withMutablePromiseCollisionResources(ResourceBuilderBase resource, ITestMutablePromiseCollisionResourcePromise resourcePromise) {
+        return withMutablePromiseCollisionResources(new ITestMutablePromiseCollisionResource(resource.getHandle(), resource.getClient()), resourcePromise);
+    }
+
+    public TestRedisResource withMutablePromiseCollisionResources(ITestMutablePromiseCollisionResource resource, ResourceBuilderBase resourcePromise) {
+        return withMutablePromiseCollisionResources(resource, new ITestMutablePromiseCollisionResourcePromise(resourcePromise.getHandle(), resourcePromise.getClient()));
+    }
+
+    public TestRedisResource withMutablePromiseCollisionResources(ResourceBuilderBase resource, ResourceBuilderBase resourcePromise) {
+        return withMutablePromiseCollisionResources(new ITestMutablePromiseCollisionResource(resource.getHandle(), resource.getClient()), new ITestMutablePromiseCollisionResourcePromise(resourcePromise.getHandle(), resourcePromise.getClient()));
+    }
+
+    public TestDatabaseResource addTestChildDatabase(String name) {
+        return addTestChildDatabase(name, null);
     }
 
     /** Adds a child database to a test Redis resource */
@@ -481,7 +3177,12 @@ class TestRedisResource extends ResourceBuilderBase {
         if (databaseName != null) {
             reqArgs.put("databaseName", AspireClient.serializeValue(databaseName));
         }
-        return (TestDatabaseResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestChildDatabase", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/addTestChildDatabase", reqArgs);
+        return (TestDatabaseResource) result;
+    }
+
+    public TestRedisResource withPersistence() {
+        return withPersistence(null);
     }
 
     /** Configures the Redis resource with persistence */
@@ -491,11 +3192,23 @@ class TestRedisResource extends ResourceBuilderBase {
         if (mode != null) {
             reqArgs.put("mode", AspireClient.serializeValue(mode));
         }
-        return (TestRedisResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withPersistence", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withPersistence", reqArgs);
+        return this;
     }
 
     /** Adds an optional string parameter */
-    public IResource withOptionalString(String value, Boolean enabled) {
+    public TestRedisResource withOptionalString(WithOptionalStringOptions optionsBag) {
+        var value = optionsBag == null ? null : optionsBag.getValue();
+        var enabled = optionsBag == null ? null : optionsBag.getEnabled();
+        return withOptionalStringImpl(value, enabled);
+    }
+
+    public TestRedisResource withOptionalString() {
+        return withOptionalString(null);
+    }
+
+    /** Adds an optional string parameter */
+    private TestRedisResource withOptionalStringImpl(String value, Boolean enabled) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         if (value != null) {
@@ -504,15 +3217,17 @@ class TestRedisResource extends ResourceBuilderBase {
         if (enabled != null) {
             reqArgs.put("enabled", AspireClient.serializeValue(enabled));
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
+        return this;
     }
 
     /** Configures the resource with a DTO */
-    public IResource withConfig(TestConfigDto config) {
+    public TestRedisResource withConfig(TestConfigDto config) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
+        return this;
     }
 
     /** Gets the tags for the resource */
@@ -534,104 +3249,142 @@ class TestRedisResource extends ResourceBuilderBase {
     }
 
     /** Sets the connection string using a reference expression */
-    public IResourceWithConnectionString withConnectionString(ReferenceExpression connectionString) {
+    public TestRedisResource withConnectionString(ReferenceExpression connectionString) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("connectionString", AspireClient.serializeValue(connectionString));
-        return (IResourceWithConnectionString) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConnectionString", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConnectionString", reqArgs);
+        return this;
     }
 
     /** Configures environment with callback (test version) */
-    public IResourceWithEnvironment testWithEnvironmentCallback(Function<Object[], Object> callback) {
+    public TestRedisResource testWithEnvironmentCallback(AspireAction1<TestEnvironmentContext> callback) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
+        var callbackId = getClient().registerCallback(args -> {
+            var arg = (TestEnvironmentContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
         }
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
+        return this;
     }
 
     /** Sets the created timestamp */
-    public IResource withCreatedAt(String createdAt) {
+    public TestRedisResource withCreatedAt(String createdAt) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("createdAt", AspireClient.serializeValue(createdAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
+        return this;
     }
 
     /** Sets the modified timestamp */
-    public IResource withModifiedAt(String modifiedAt) {
+    public TestRedisResource withModifiedAt(String modifiedAt) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("modifiedAt", AspireClient.serializeValue(modifiedAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
+        return this;
     }
 
     /** Sets the correlation ID */
-    public IResource withCorrelationId(String correlationId) {
+    public TestRedisResource withCorrelationId(String correlationId) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("correlationId", AspireClient.serializeValue(correlationId));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
+        return this;
+    }
+
+    public TestRedisResource withOptionalCallback() {
+        return withOptionalCallback(null);
     }
 
     /** Configures with optional callback */
-    public IResource withOptionalCallback(Function<Object[], Object> callback) {
+    public TestRedisResource withOptionalCallback(AspireAction1<TestCallbackContext> callback) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
+        var callbackId = callback == null ? null : getClient().registerCallback(args -> {
+            var arg = (TestCallbackContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
+        return this;
     }
 
     /** Sets the resource status */
-    public IResource withStatus(TestResourceStatus status) {
+    public TestRedisResource withStatus(TestResourceStatus status) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("status", AspireClient.serializeValue(status));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
+        return this;
     }
 
     /** Configures with nested DTO */
-    public IResource withNestedConfig(TestNestedDto config) {
+    public TestRedisResource withNestedConfig(TestNestedDto config) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
+        return this;
     }
 
     /** Adds validation callback */
-    public IResource withValidator(Function<Object[], Object> validator) {
+    public TestRedisResource withValidator(AspireFunc1<TestResourceContext, Boolean> validator) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (validator != null) {
-            reqArgs.put("validator", getClient().registerCallback(validator));
+        var validatorId = getClient().registerCallback(args -> {
+            var arg = (TestResourceContext) args[0];
+            return AspireClient.awaitValue(validator.invoke(arg));
+        });
+        if (validatorId != null) {
+            reqArgs.put("validator", validatorId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
+        return this;
     }
 
     /** Waits for another resource (test version) */
-    public IResource testWaitFor(IResource dependency) {
+    public TestRedisResource testWaitFor(IResource dependency) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
+        return this;
+    }
+
+    public TestRedisResource testWaitFor(ResourceBuilderBase dependency) {
+        return testWaitFor(new IResource(dependency.getHandle(), dependency.getClient()));
     }
 
     /** Gets the endpoints */
     public String[] getEndpoints() {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        return (String[]) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/getEndpoints", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/getEndpoints", reqArgs);
+        return (String[]) AspireClient.convertArray(result, String[].class.getComponentType(), item0 -> (String) item0);
     }
 
     /** Sets connection string using direct interface target */
-    public IResourceWithConnectionString withConnectionStringDirect(String connectionString) {
+    public TestRedisResource withConnectionStringDirect(String connectionString) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("connectionString", AspireClient.serializeValue(connectionString));
-        return (IResourceWithConnectionString) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConnectionStringDirect", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConnectionStringDirect", reqArgs);
+        return this;
     }
 
     /** Redis-specific configuration */
@@ -639,31 +3392,64 @@ class TestRedisResource extends ResourceBuilderBase {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("option", AspireClient.serializeValue(option));
-        return (TestRedisResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withRedisSpecific", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withRedisSpecific", reqArgs);
+        return this;
     }
 
     /** Adds a dependency on another resource */
-    public IResource withDependency(IResourceWithConnectionString dependency) {
+    public TestRedisResource withDependency(IResourceWithConnectionString dependency) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
+        return this;
+    }
+
+    public TestRedisResource withDependency(ResourceBuilderBase dependency) {
+        return withDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    public TestRedisResource withUnionDependency(String dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestRedisResource withUnionDependency(IResourceWithConnectionString dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestRedisResource withUnionDependency(ResourceBuilderBase dependency) {
+        return withUnionDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    /** Adds a dependency from a string or another resource */
+    public TestRedisResource withUnionDependency(AspireUnion dependency) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withUnionDependency", reqArgs);
+        return this;
     }
 
     /** Sets the endpoints */
-    public IResource withEndpoints(String[] endpoints) {
+    public TestRedisResource withEndpoints(String[] endpoints) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("endpoints", AspireClient.serializeValue(endpoints));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
+        return this;
     }
 
     /** Sets environment variables */
-    public IResourceWithEnvironment withEnvironmentVariables(Map<String, String> variables) {
+    public TestRedisResource withEnvironmentVariables(Map<String, String> variables) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("variables", AspireClient.serializeValue(variables));
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
+        return this;
+    }
+
+    public String getStatusAsync() {
+        return getStatusAsync(null);
     }
 
     /** Gets the status of the resource asynchronously */
@@ -671,19 +3457,32 @@ class TestRedisResource extends ResourceBuilderBase {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         if (cancellationToken != null) {
-            reqArgs.put("cancellationToken", getClient().registerCancellation(cancellationToken));
+            reqArgs.put("cancellationToken", cancellationToken);
         }
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/getStatusAsync", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/getStatusAsync", reqArgs);
+        return (String) result;
     }
 
     /** Performs a cancellable operation */
-    public IResource withCancellableOperation(Function<Object[], Object> operation) {
+    public TestRedisResource withCancellableOperation(AspireAction1<CancellationToken> operation) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (operation != null) {
-            reqArgs.put("operation", getClient().registerCallback(operation));
+        var operationId = getClient().registerCallback(args -> {
+            var arg = CancellationToken.fromValue(args[0]);
+            operation.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (operationId != null) {
+            reqArgs.put("operation", operationId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
+        return this;
+    }
+
+    public boolean waitForReadyAsync(double timeout) {
+        return waitForReadyAsync(timeout, null);
     }
 
     /** Waits for the resource to be ready */
@@ -692,25 +3491,197 @@ class TestRedisResource extends ResourceBuilderBase {
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("timeout", AspireClient.serializeValue(timeout));
         if (cancellationToken != null) {
-            reqArgs.put("cancellationToken", getClient().registerCancellation(cancellationToken));
+            reqArgs.put("cancellationToken", cancellationToken);
         }
-        return (boolean) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/waitForReadyAsync", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/waitForReadyAsync", reqArgs);
+        return (Boolean) result;
     }
 
     /** Tests multi-param callback destructuring */
-    public TestRedisResource withMultiParamHandleCallback(Function<Object[], Object> callback) {
+    public TestRedisResource withMultiParamHandleCallback(AspireAction2<TestCallbackContext, TestEnvironmentContext> callback) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
+        var callbackId = getClient().registerCallback(args -> {
+            var arg1 = (TestCallbackContext) args[0];
+            var arg2 = (TestEnvironmentContext) args[1];
+            callback.invoke(arg1, arg2);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg1);
+            __aspireCallbackArguments.put("p1", arg2);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
         }
-        return (TestRedisResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMultiParamHandleCallback", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMultiParamHandleCallback", reqArgs);
+        return this;
+    }
+
+    /** Adds a data volume with persistence */
+    public TestRedisResource withDataVolume(WithDataVolumeOptions optionsBag) {
+        var name = optionsBag == null ? null : optionsBag.getName();
+        var isReadOnly = optionsBag == null ? null : optionsBag.isReadOnly();
+        return withDataVolumeImpl(name, isReadOnly);
+    }
+
+    public TestRedisResource withDataVolume() {
+        return withDataVolume(null);
+    }
+
+    /** Adds a data volume with persistence */
+    private TestRedisResource withDataVolumeImpl(String name, Boolean isReadOnly) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        if (name != null) {
+            reqArgs.put("name", AspireClient.serializeValue(name));
+        }
+        if (isReadOnly != null) {
+            reqArgs.put("isReadOnly", AspireClient.serializeValue(isReadOnly));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDataVolume", reqArgs);
+        return this;
+    }
+
+    /** Configures a Redis resource with the concrete vault resource as a parameter. */
+    public TestRedisResource withConcreteVaultResource(TestVaultResource resource) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("resource", AspireClient.serializeValue(resource));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConcreteVaultResource", reqArgs);
+        return this;
+    }
+
+    /** Adds a label to the resource */
+    public TestRedisResource withMergeLabel(String label) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabel", reqArgs);
+        return this;
+    }
+
+    /** Adds a categorized label to the resource */
+    public TestRedisResource withMergeLabelCategorized(String label, String category) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        reqArgs.put("category", AspireClient.serializeValue(category));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabelCategorized", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint */
+    public TestRedisResource withMergeEndpoint(String endpointName, double port) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpoint", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint with scheme */
+    public TestRedisResource withMergeEndpointScheme(String endpointName, double port, String scheme) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        reqArgs.put("scheme", AspireClient.serializeValue(scheme));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpointScheme", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging */
+    public TestRedisResource withMergeLogging(String logLevel, WithMergeLoggingOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingImpl(logLevel, enableConsole, maxFiles);
+    }
+
+    public TestRedisResource withMergeLogging(String logLevel) {
+        return withMergeLogging(logLevel, null);
+    }
+
+    /** Configures resource logging */
+    private TestRedisResource withMergeLoggingImpl(String logLevel, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLogging", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging with file path */
+    public TestRedisResource withMergeLoggingPath(String logLevel, String logPath, WithMergeLoggingPathOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingPathImpl(logLevel, logPath, enableConsole, maxFiles);
+    }
+
+    public TestRedisResource withMergeLoggingPath(String logLevel, String logPath) {
+        return withMergeLoggingPath(logLevel, logPath, null);
+    }
+
+    /** Configures resource logging with file path */
+    private TestRedisResource withMergeLoggingPathImpl(String logLevel, String logPath, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        reqArgs.put("logPath", AspireClient.serializeValue(logPath));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLoggingPath", reqArgs);
+        return this;
+    }
+
+    /** Configures a route */
+    public TestRedisResource withMergeRoute(String path, String method, String handler, double priority) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRoute", reqArgs);
+        return this;
+    }
+
+    /** Configures a route with middleware */
+    public TestRedisResource withMergeRouteMiddleware(String path, String method, String handler, double priority, String middleware) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        reqArgs.put("middleware", AspireClient.serializeValue(middleware));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRouteMiddleware", reqArgs);
+        return this;
     }
 
 }
 
+// ===== aspire/TestResourceContext.java =====
+// TestResourceContext.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
 /** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestResourceContext. */
-class TestResourceContext extends HandleWrapperBase {
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestResourceContext extends HandleWrapperBase {
     TestResourceContext(Handle handle, AspireClient client) {
         super(handle, client);
     }
@@ -719,7 +3690,8 @@ class TestResourceContext extends HandleWrapperBase {
     public String name() {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.name", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.name", reqArgs);
+        return (String) result;
     }
 
     /** Sets the Name property */
@@ -727,14 +3699,16 @@ class TestResourceContext extends HandleWrapperBase {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
         reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestResourceContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.setName", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.setName", reqArgs);
+        return (TestResourceContext) result;
     }
 
     /** Gets the Value property */
     public double value() {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (double) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.value", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.value", reqArgs);
+        return ((Number) result).doubleValue();
     }
 
     /** Sets the Value property */
@@ -742,17 +3716,19 @@ class TestResourceContext extends HandleWrapperBase {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
         reqArgs.put("value", AspireClient.serializeValue(value));
-        return (TestResourceContext) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.setValue", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.setValue", reqArgs);
+        return (TestResourceContext) result;
     }
 
-    /** Invokes the GetValueAsync method */
+    /** Instance method that should be exposed as async method. */
     public String getValueAsync() {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (String) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.getValueAsync", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.getValueAsync", reqArgs);
+        return (String) result;
     }
 
-    /** Invokes the SetValueAsync method */
+    /** Instance method with parameter. */
     public void setValueAsync(String value) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
@@ -760,23 +3736,73 @@ class TestResourceContext extends HandleWrapperBase {
         getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.setValueAsync", reqArgs);
     }
 
-    /** Invokes the ValidateAsync method */
+    /** Instance method with return type. */
     public boolean validateAsync() {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("context", AspireClient.serializeValue(getHandle()));
-        return (boolean) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.validateAsync", reqArgs);
+        var result = getClient().invokeCapability("Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes/TestResourceContext.validateAsync", reqArgs);
+        return (Boolean) result;
     }
 
 }
 
+// ===== aspire/TestResourceStatus.java =====
+// TestResourceStatus.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** TestResourceStatus enum. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public enum TestResourceStatus implements WireValueEnum {
+    PENDING("Pending"),
+    RUNNING("Running"),
+    STOPPED("Stopped"),
+    FAILED("Failed");
+
+    private final String value;
+
+    TestResourceStatus(String value) {
+        this.value = value;
+    }
+
+    public String getValue() { return value; }
+
+    public static TestResourceStatus fromValue(String value) {
+        for (TestResourceStatus e : values()) {
+            if (e.value.equals(value)) return e;
+        }
+        throw new IllegalArgumentException("Unknown value: " + value);
+    }
+}
+
+// ===== aspire/TestVaultResource.java =====
+// TestVaultResource.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+import java.util.HashMap;
+import java.util.Map;
+
 /** Wrapper for Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestVaultResource. */
-class TestVaultResource extends ResourceBuilderBase {
+@SuppressWarnings({"all", "unchecked", "serial"})
+public class TestVaultResource extends ResourceBuilderBase {
     TestVaultResource(Handle handle, AspireClient client) {
         super(handle, client);
     }
 
     /** Adds an optional string parameter */
-    public IResource withOptionalString(String value, Boolean enabled) {
+    public TestVaultResource withOptionalString(WithOptionalStringOptions optionsBag) {
+        var value = optionsBag == null ? null : optionsBag.getValue();
+        var enabled = optionsBag == null ? null : optionsBag.getEnabled();
+        return withOptionalStringImpl(value, enabled);
+    }
+
+    public TestVaultResource withOptionalString() {
+        return withOptionalString(null);
+    }
+
+    /** Adds an optional string parameter */
+    private TestVaultResource withOptionalStringImpl(String value, Boolean enabled) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         if (value != null) {
@@ -785,203 +3811,494 @@ class TestVaultResource extends ResourceBuilderBase {
         if (enabled != null) {
             reqArgs.put("enabled", AspireClient.serializeValue(enabled));
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalString", reqArgs);
+        return this;
     }
 
     /** Configures the resource with a DTO */
-    public IResource withConfig(TestConfigDto config) {
+    public TestVaultResource withConfig(TestConfigDto config) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withConfig", reqArgs);
+        return this;
     }
 
     /** Configures environment with callback (test version) */
-    public IResourceWithEnvironment testWithEnvironmentCallback(Function<Object[], Object> callback) {
+    public TestVaultResource testWithEnvironmentCallback(AspireAction1<TestEnvironmentContext> callback) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
+        var callbackId = getClient().registerCallback(args -> {
+            var arg = (TestEnvironmentContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
         }
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWithEnvironmentCallback", reqArgs);
+        return this;
     }
 
     /** Sets the created timestamp */
-    public IResource withCreatedAt(String createdAt) {
+    public TestVaultResource withCreatedAt(String createdAt) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("createdAt", AspireClient.serializeValue(createdAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCreatedAt", reqArgs);
+        return this;
     }
 
     /** Sets the modified timestamp */
-    public IResource withModifiedAt(String modifiedAt) {
+    public TestVaultResource withModifiedAt(String modifiedAt) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("modifiedAt", AspireClient.serializeValue(modifiedAt));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withModifiedAt", reqArgs);
+        return this;
     }
 
     /** Sets the correlation ID */
-    public IResource withCorrelationId(String correlationId) {
+    public TestVaultResource withCorrelationId(String correlationId) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("correlationId", AspireClient.serializeValue(correlationId));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCorrelationId", reqArgs);
+        return this;
+    }
+
+    public TestVaultResource withOptionalCallback() {
+        return withOptionalCallback(null);
     }
 
     /** Configures with optional callback */
-    public IResource withOptionalCallback(Function<Object[], Object> callback) {
+    public TestVaultResource withOptionalCallback(AspireAction1<TestCallbackContext> callback) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (callback != null) {
-            reqArgs.put("callback", getClient().registerCallback(callback));
+        var callbackId = callback == null ? null : getClient().registerCallback(args -> {
+            var arg = (TestCallbackContext) args[0];
+            callback.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (callbackId != null) {
+            reqArgs.put("callback", callbackId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withOptionalCallback", reqArgs);
+        return this;
     }
 
     /** Sets the resource status */
-    public IResource withStatus(TestResourceStatus status) {
+    public TestVaultResource withStatus(TestResourceStatus status) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("status", AspireClient.serializeValue(status));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withStatus", reqArgs);
+        return this;
     }
 
     /** Configures with nested DTO */
-    public IResource withNestedConfig(TestNestedDto config) {
+    public TestVaultResource withNestedConfig(TestNestedDto config) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("config", AspireClient.serializeValue(config));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withNestedConfig", reqArgs);
+        return this;
     }
 
     /** Adds validation callback */
-    public IResource withValidator(Function<Object[], Object> validator) {
+    public TestVaultResource withValidator(AspireFunc1<TestResourceContext, Boolean> validator) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (validator != null) {
-            reqArgs.put("validator", getClient().registerCallback(validator));
+        var validatorId = getClient().registerCallback(args -> {
+            var arg = (TestResourceContext) args[0];
+            return AspireClient.awaitValue(validator.invoke(arg));
+        });
+        if (validatorId != null) {
+            reqArgs.put("validator", validatorId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withValidator", reqArgs);
+        return this;
     }
 
     /** Waits for another resource (test version) */
-    public IResource testWaitFor(IResource dependency) {
+    public TestVaultResource testWaitFor(IResource dependency) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/testWaitFor", reqArgs);
+        return this;
+    }
+
+    public TestVaultResource testWaitFor(ResourceBuilderBase dependency) {
+        return testWaitFor(new IResource(dependency.getHandle(), dependency.getClient()));
     }
 
     /** Adds a dependency on another resource */
-    public IResource withDependency(IResourceWithConnectionString dependency) {
+    public TestVaultResource withDependency(IResourceWithConnectionString dependency) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("dependency", AspireClient.serializeValue(dependency));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withDependency", reqArgs);
+        return this;
+    }
+
+    public TestVaultResource withDependency(ResourceBuilderBase dependency) {
+        return withDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    public TestVaultResource withUnionDependency(String dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestVaultResource withUnionDependency(IResourceWithConnectionString dependency) {
+        return withUnionDependency(AspireUnion.of(dependency));
+    }
+
+    public TestVaultResource withUnionDependency(ResourceBuilderBase dependency) {
+        return withUnionDependency(new IResourceWithConnectionString(dependency.getHandle(), dependency.getClient()));
+    }
+
+    /** Adds a dependency from a string or another resource */
+    public TestVaultResource withUnionDependency(AspireUnion dependency) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("dependency", AspireClient.serializeValue(dependency));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withUnionDependency", reqArgs);
+        return this;
     }
 
     /** Sets the endpoints */
-    public IResource withEndpoints(String[] endpoints) {
+    public TestVaultResource withEndpoints(String[] endpoints) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("endpoints", AspireClient.serializeValue(endpoints));
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEndpoints", reqArgs);
+        return this;
     }
 
     /** Sets environment variables */
-    public IResourceWithEnvironment withEnvironmentVariables(Map<String, String> variables) {
+    public TestVaultResource withEnvironmentVariables(Map<String, String> variables) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("variables", AspireClient.serializeValue(variables));
-        return (IResourceWithEnvironment) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withEnvironmentVariables", reqArgs);
+        return this;
     }
 
     /** Performs a cancellable operation */
-    public IResource withCancellableOperation(Function<Object[], Object> operation) {
+    public TestVaultResource withCancellableOperation(AspireAction1<CancellationToken> operation) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
-        if (operation != null) {
-            reqArgs.put("operation", getClient().registerCallback(operation));
+        var operationId = getClient().registerCallback(args -> {
+            var arg = CancellationToken.fromValue(args[0]);
+            operation.invoke(arg);
+            var __aspireCallbackArguments = new HashMap<String, Object>();
+            __aspireCallbackArguments.put("p0", arg);
+            return __aspireCallbackArguments;
+        });
+        if (operationId != null) {
+            reqArgs.put("operation", operationId);
         }
-        return (IResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withCancellableOperation", reqArgs);
+        return this;
     }
 
     /** Configures vault using direct interface target */
-    public ITestVaultResource withVaultDirect(String option) {
+    public TestVaultResource withVaultDirect(String option) {
         Map<String, Object> reqArgs = new HashMap<>();
         reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
         reqArgs.put("option", AspireClient.serializeValue(option));
-        return (ITestVaultResource) getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withVaultDirect", reqArgs);
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withVaultDirect", reqArgs);
+        return this;
+    }
+
+    /** Adds a label to the resource */
+    public TestVaultResource withMergeLabel(String label) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabel", reqArgs);
+        return this;
+    }
+
+    /** Adds a categorized label to the resource */
+    public TestVaultResource withMergeLabelCategorized(String label, String category) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("label", AspireClient.serializeValue(label));
+        reqArgs.put("category", AspireClient.serializeValue(category));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLabelCategorized", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint */
+    public TestVaultResource withMergeEndpoint(String endpointName, double port) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpoint", reqArgs);
+        return this;
+    }
+
+    /** Configures a named endpoint with scheme */
+    public TestVaultResource withMergeEndpointScheme(String endpointName, double port, String scheme) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("endpointName", AspireClient.serializeValue(endpointName));
+        reqArgs.put("port", AspireClient.serializeValue(port));
+        reqArgs.put("scheme", AspireClient.serializeValue(scheme));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeEndpointScheme", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging */
+    public TestVaultResource withMergeLogging(String logLevel, WithMergeLoggingOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingImpl(logLevel, enableConsole, maxFiles);
+    }
+
+    public TestVaultResource withMergeLogging(String logLevel) {
+        return withMergeLogging(logLevel, null);
+    }
+
+    /** Configures resource logging */
+    private TestVaultResource withMergeLoggingImpl(String logLevel, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLogging", reqArgs);
+        return this;
+    }
+
+    /** Configures resource logging with file path */
+    public TestVaultResource withMergeLoggingPath(String logLevel, String logPath, WithMergeLoggingPathOptions optionsBag) {
+        var enableConsole = optionsBag == null ? null : optionsBag.getEnableConsole();
+        var maxFiles = optionsBag == null ? null : optionsBag.getMaxFiles();
+        return withMergeLoggingPathImpl(logLevel, logPath, enableConsole, maxFiles);
+    }
+
+    public TestVaultResource withMergeLoggingPath(String logLevel, String logPath) {
+        return withMergeLoggingPath(logLevel, logPath, null);
+    }
+
+    /** Configures resource logging with file path */
+    private TestVaultResource withMergeLoggingPathImpl(String logLevel, String logPath, Boolean enableConsole, Number maxFiles) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("logLevel", AspireClient.serializeValue(logLevel));
+        reqArgs.put("logPath", AspireClient.serializeValue(logPath));
+        if (enableConsole != null) {
+            reqArgs.put("enableConsole", AspireClient.serializeValue(enableConsole));
+        }
+        if (maxFiles != null) {
+            reqArgs.put("maxFiles", AspireClient.serializeValue(maxFiles));
+        }
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeLoggingPath", reqArgs);
+        return this;
+    }
+
+    /** Configures a route */
+    public TestVaultResource withMergeRoute(String path, String method, String handler, double priority) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRoute", reqArgs);
+        return this;
+    }
+
+    /** Configures a route with middleware */
+    public TestVaultResource withMergeRouteMiddleware(String path, String method, String handler, double priority, String middleware) {
+        Map<String, Object> reqArgs = new HashMap<>();
+        reqArgs.put("builder", AspireClient.serializeValue(getHandle()));
+        reqArgs.put("path", AspireClient.serializeValue(path));
+        reqArgs.put("method", AspireClient.serializeValue(method));
+        reqArgs.put("handler", AspireClient.serializeValue(handler));
+        reqArgs.put("priority", AspireClient.serializeValue(priority));
+        reqArgs.put("middleware", AspireClient.serializeValue(middleware));
+        getClient().invokeCapability("Aspire.Hosting.CodeGeneration.Java.Tests/withMergeRouteMiddleware", reqArgs);
+        return this;
     }
 
 }
 
-// ============================================================================
-// Handle wrapper registrations
-// ============================================================================
+// ===== aspire/WireValueEnum.java =====
+// WireValueEnum.java - GENERATED CODE - DO NOT EDIT
 
-/** Static initializer to register handle wrappers. */
-class AspireRegistrations {
-    static {
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCallbackContext", (h, c) -> new TestCallbackContext(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestResourceContext", (h, c) -> new TestResourceContext(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestEnvironmentContext", (h, c) -> new TestEnvironmentContext(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestCollectionContext", (h, c) -> new TestCollectionContext(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestRedisResource", (h, c) -> new TestRedisResource(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestDatabaseResource", (h, c) -> new TestDatabaseResource(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResource", (h, c) -> new IResource(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithConnectionString", (h, c) -> new IResourceWithConnectionString(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.TestVaultResource", (h, c) -> new TestVaultResource(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting.CodeGeneration.Java.Tests/Aspire.Hosting.CodeGeneration.TypeScript.Tests.TestTypes.ITestVaultResource", (h, c) -> new ITestVaultResource(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.IDistributedApplicationBuilder", (h, c) -> new IDistributedApplicationBuilder(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResourceWithEnvironment", (h, c) -> new IResourceWithEnvironment(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/List<string>", (h, c) -> new AspireList(h, c));
-        AspireClient.registerHandleWrapper("Aspire.Hosting/Dict<string,string>", (h, c) -> new AspireDict(h, c));
-    }
+package aspire;
 
-    static void ensureRegistered() {
-        // Called to trigger static initializer
-    }
+/**
+ * Marker interface for generated enums that need a transport value distinct from Enum.name().
+ */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public interface WireValueEnum {
+    String getValue();
 }
 
-// ============================================================================
-// Connection Helpers
-// ============================================================================
+// ===== aspire/WithDataVolumeOptions.java =====
+// WithDataVolumeOptions.java - GENERATED CODE - DO NOT EDIT
 
-/** Main entry point for Aspire SDK. */
-public class Aspire {
-    /** Connect to the AppHost server. */
-    public static AspireClient connect() throws Exception {
-        AspireRegistrations.ensureRegistered();
-        String socketPath = System.getenv("REMOTE_APP_HOST_SOCKET_PATH");
-        if (socketPath == null || socketPath.isEmpty()) {
-            throw new RuntimeException("REMOTE_APP_HOST_SOCKET_PATH environment variable not set. Run this application using `aspire run`.");
-        }
-        AspireClient client = new AspireClient(socketPath);
-        client.connect();
-        client.onDisconnect(() -> System.exit(1));
-        return client;
+package aspire;
+
+/** Options for WithDataVolume. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class WithDataVolumeOptions {
+    private String name;
+    private Boolean isReadOnly;
+
+    public String getName() { return name; }
+    public WithDataVolumeOptions name(String value) {
+        this.name = value;
+        return this;
     }
 
-    /** Create a new distributed application builder. */
-    public static IDistributedApplicationBuilder createBuilder(CreateBuilderOptions options) throws Exception {
-        AspireClient client = connect();
-        Map<String, Object> resolvedOptions = new HashMap<>();
-        if (options != null) {
-            resolvedOptions.putAll(options.toMap());
-        }
-        if (!resolvedOptions.containsKey("Args")) {
-            // Note: Java doesn't have easy access to command line args from here
-            resolvedOptions.put("Args", new String[0]);
-        }
-        if (!resolvedOptions.containsKey("ProjectDirectory")) {
-            resolvedOptions.put("ProjectDirectory", System.getProperty("user.dir"));
-        }
-        Map<String, Object> args = new HashMap<>();
-        args.put("options", resolvedOptions);
-        return (IDistributedApplicationBuilder) client.invokeCapability("Aspire.Hosting/createBuilderWithOptions", args);
+    public Boolean isReadOnly() { return isReadOnly; }
+    public WithDataVolumeOptions isReadOnly(Boolean value) {
+        this.isReadOnly = value;
+        return this;
     }
+
 }
 
+// ===== aspire/WithMergeLoggingOptions.java =====
+// WithMergeLoggingOptions.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Options for WithMergeLogging. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class WithMergeLoggingOptions {
+    private Boolean enableConsole;
+    private Number maxFiles;
+
+    public Boolean getEnableConsole() { return enableConsole; }
+    public WithMergeLoggingOptions enableConsole(Boolean value) {
+        this.enableConsole = value;
+        return this;
+    }
+
+    public Number getMaxFiles() { return maxFiles; }
+    public WithMergeLoggingOptions maxFiles(Number value) {
+        this.maxFiles = value;
+        return this;
+    }
+
+}
+
+// ===== aspire/WithMergeLoggingPathOptions.java =====
+// WithMergeLoggingPathOptions.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Options for WithMergeLoggingPath. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class WithMergeLoggingPathOptions {
+    private Boolean enableConsole;
+    private Number maxFiles;
+
+    public Boolean getEnableConsole() { return enableConsole; }
+    public WithMergeLoggingPathOptions enableConsole(Boolean value) {
+        this.enableConsole = value;
+        return this;
+    }
+
+    public Number getMaxFiles() { return maxFiles; }
+    public WithMergeLoggingPathOptions maxFiles(Number value) {
+        this.maxFiles = value;
+        return this;
+    }
+
+}
+
+// ===== aspire/WithOptionalStringOptions.java =====
+// WithOptionalStringOptions.java - GENERATED CODE - DO NOT EDIT
+
+package aspire;
+
+/** Options for WithOptionalString. */
+@SuppressWarnings({"all", "unchecked", "serial"})
+public final class WithOptionalStringOptions {
+    private String value;
+    private Boolean enabled;
+
+    public String getValue() { return value; }
+    public WithOptionalStringOptions value(String value) {
+        this.value = value;
+        return this;
+    }
+
+    public Boolean getEnabled() { return enabled; }
+    public WithOptionalStringOptions enabled(Boolean value) {
+        this.enabled = value;
+        return this;
+    }
+
+}
+
+// ===== sources.txt =====
+.aspire/modules/aspire/Aspire.java
+.aspire/modules/aspire/AspireAction0.java
+.aspire/modules/aspire/AspireAction1.java
+.aspire/modules/aspire/AspireAction2.java
+.aspire/modules/aspire/AspireAction3.java
+.aspire/modules/aspire/AspireAction4.java
+.aspire/modules/aspire/AspireClient.java
+.aspire/modules/aspire/AspireDict.java
+.aspire/modules/aspire/AspireFunc0.java
+.aspire/modules/aspire/AspireFunc1.java
+.aspire/modules/aspire/AspireFunc2.java
+.aspire/modules/aspire/AspireFunc3.java
+.aspire/modules/aspire/AspireFunc4.java
+.aspire/modules/aspire/AspireList.java
+.aspire/modules/aspire/AspireRegistrations.java
+.aspire/modules/aspire/AspireUnion.java
+.aspire/modules/aspire/BaseRegistrations.java
+.aspire/modules/aspire/CancellationToken.java
+.aspire/modules/aspire/CapabilityError.java
+.aspire/modules/aspire/Handle.java
+.aspire/modules/aspire/HandleWrapperBase.java
+.aspire/modules/aspire/IDistributedApplicationBuilder.java
+.aspire/modules/aspire/IResource.java
+.aspire/modules/aspire/IResourceWithConnectionString.java
+.aspire/modules/aspire/IResourceWithEnvironment.java
+.aspire/modules/aspire/ITestMutablePromiseCollisionResource.java
+.aspire/modules/aspire/ITestMutablePromiseCollisionResourcePromise.java
+.aspire/modules/aspire/ITestPromiseCollisionResource.java
+.aspire/modules/aspire/ITestPromiseCollisionResourcePromise.java
+.aspire/modules/aspire/ITestVaultResource.java
+.aspire/modules/aspire/JsonSerializable.java
+.aspire/modules/aspire/ReferenceExpression.java
+.aspire/modules/aspire/ResourceBuilderBase.java
+.aspire/modules/aspire/TestCallbackContext.java
+.aspire/modules/aspire/TestCollectionContext.java
+.aspire/modules/aspire/TestConfigDto.java
+.aspire/modules/aspire/TestConfigs.java
+.aspire/modules/aspire/TestDatabaseResource.java
+.aspire/modules/aspire/TestDeeplyNestedDto.java
+.aspire/modules/aspire/TestEnvironmentContext.java
+.aspire/modules/aspire/TestMutableCollectionContext.java
+.aspire/modules/aspire/TestNestedDto.java
+.aspire/modules/aspire/TestPersistenceMode.java
+.aspire/modules/aspire/TestRedisResource.java
+.aspire/modules/aspire/TestResourceContext.java
+.aspire/modules/aspire/TestResourceStatus.java
+.aspire/modules/aspire/TestVaultResource.java
+.aspire/modules/aspire/WireValueEnum.java
+.aspire/modules/aspire/WithDataVolumeOptions.java
+.aspire/modules/aspire/WithMergeLoggingOptions.java
+.aspire/modules/aspire/WithMergeLoggingPathOptions.java
+.aspire/modules/aspire/WithOptionalStringOptions.java

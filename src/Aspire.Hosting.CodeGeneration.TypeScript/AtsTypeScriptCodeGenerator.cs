@@ -2,8 +2,9 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Globalization;
-using System.Reflection;
-using Aspire.Hosting.Ats;
+using System.Text;
+using System.Text.Json;
+using Aspire.TypeSystem;
 
 namespace Aspire.Hosting.CodeGeneration.TypeScript;
 
@@ -96,176 +97,331 @@ internal sealed class BuilderModel
 /// </list>
 /// </para>
 /// </remarks>
-public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
+internal sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
 {
     private TextWriter _writer = null!;
 
-    // Mapping of typeId -> wrapper class name for all generated wrapper types
-    // Used to resolve parameter types to wrapper classes instead of handle types
-    private readonly Dictionary<string, string> _wrapperClassNames = new(StringComparer.Ordinal);
-
-    // Set of type IDs that have Promise wrappers (types with chainable methods)
-    // Used to determine return types for methods
-    private readonly HashSet<string> _typesWithPromiseWrappers = new(StringComparer.Ordinal);
-
-    // Set of generated options interfaces to avoid duplicates
-    private readonly HashSet<string> _generatedOptionsInterfaces = new(StringComparer.Ordinal);
-
-    // Collected options interfaces to generate (interface name -> list of optional params)
-    private readonly Dictionary<string, List<AtsParameterInfo>> _optionsInterfacesToGenerate = new(StringComparer.Ordinal);
-
-    // Mapping of enum type IDs to TypeScript enum names
-    private readonly Dictionary<string, string> _enumTypeNames = new(StringComparer.Ordinal);
-
     /// <summary>
-    /// Checks if an AtsTypeRef represents a handle type.
+    /// Owns every TypeScript-specific resolution decision. Assigned per generation because it is
+    /// built from the context being generated; the canonical API exporter builds the same projector
+    /// from the same context so documentation cannot drift from emitted source.
     /// </summary>
-    private static bool IsHandleType(AtsTypeRef? typeRef) =>
-        typeRef != null && typeRef.Category == AtsTypeCategory.Handle;
+    private TypeScriptApiProjector _projector = null!;
 
-    /// <summary>
-    /// Maps an AtsTypeRef to a TypeScript type using category-based dispatch.
-    /// This is the preferred method - uses type metadata rather than string parsing.
-    /// </summary>
-    private string MapTypeRefToTypeScript(AtsTypeRef? typeRef)
+    private void WriteCapabilityDocComment(
+        string indent,
+        AtsCapabilityInfo capability,
+        IReadOnlyList<AtsParameterInfo>? publicParameters = null,
+        string? optionsParameterName = null)
     {
-        if (typeRef == null)
+        var parameterDocs = (publicParameters ?? capability.Parameters
+                .Where(p => !string.Equals(p.Name, capability.TargetParameterName, StringComparison.Ordinal))
+                .ToList())
+            .Select(p => (p.Name, Summary: p.Documentation?.Summary))
+            .Where(static p => !string.IsNullOrWhiteSpace(p.Summary))
+            .ToList();
+
+        if (!string.IsNullOrWhiteSpace(optionsParameterName))
         {
-            return "unknown";
+            parameterDocs.Add((optionsParameterName, "Additional options."));
         }
 
-        // Check for wrapper class first (handles custom types like ReferenceExpression)
-        if (_wrapperClassNames.TryGetValue(typeRef.TypeId, out var wrapperClassName))
-        {
-            return wrapperClassName;
-        }
-
-        return typeRef.Category switch
-        {
-            AtsTypeCategory.Primitive => MapPrimitiveType(typeRef.TypeId),
-            AtsTypeCategory.Enum => MapEnumType(typeRef.TypeId),
-            AtsTypeCategory.Handle => GetWrapperOrHandleName(typeRef.TypeId),
-            AtsTypeCategory.Dto => GetDtoInterfaceName(typeRef.TypeId),
-            AtsTypeCategory.Callback => "Function",  // Callbacks handled separately with full signature
-            AtsTypeCategory.Array => $"{MapTypeRefToTypeScript(typeRef.ElementType)}[]",
-            AtsTypeCategory.List => $"AspireList<{MapTypeRefToTypeScript(typeRef.ElementType)}>",
-            AtsTypeCategory.Dict => typeRef.IsReadOnly
-                ? $"Record<{MapTypeRefToTypeScript(typeRef.KeyType)}, {MapTypeRefToTypeScript(typeRef.ValueType)}>"
-                : $"AspireDict<{MapTypeRefToTypeScript(typeRef.KeyType)}, {MapTypeRefToTypeScript(typeRef.ValueType)}>",
-            AtsTypeCategory.Union => MapUnionTypeToTypeScript(typeRef),
-            AtsTypeCategory.Unknown => "any",  // Unknown types use 'any' since they're not in the ATS universe
-            _ => "any"  // Fallback for any unhandled categories
-        };
+        WriteDocumentationComment(
+            indent,
+            capability.Documentation,
+            capability.Documentation is null ? capability.Description : null,
+            parameterDocs,
+            capability.ReturnType.TypeId == AtsConstants.Void ? null : capability.Documentation?.Returns,
+            suppressReturns: capability.ReturnType.TypeId == AtsConstants.Void,
+            isExperimental: AtsTypeSystemCompatibility.IsExperimental(capability),
+            isObsolete: capability.IsObsolete,
+            obsoleteMessage: capability.ObsoleteMessage);
     }
 
-    /// <summary>
-    /// Maps primitive type IDs to TypeScript types.
-    /// </summary>
-    private static string MapPrimitiveType(string typeId) => typeId switch
+    private void WritePropertyDocComment(string indent, AtsCapabilityInfo? getter, AtsCapabilityInfo? setter)
     {
-        AtsConstants.String or AtsConstants.Char => "string",
-        AtsConstants.Number => "number",
-        AtsConstants.Boolean => "boolean",
-        AtsConstants.Void => "void",
-        AtsConstants.Any => "any",
-        AtsConstants.DateTime or AtsConstants.DateTimeOffset or
-        AtsConstants.DateOnly or AtsConstants.TimeOnly => "string",
-        AtsConstants.TimeSpan => "number",
-        AtsConstants.Guid or AtsConstants.Uri => "string",
-        AtsConstants.CancellationToken => "AbortSignal",
-        _ => typeId
-    };
+        var capability = getter is not null &&
+            (getter.Documentation is not null ||
+                !string.IsNullOrWhiteSpace(getter.Description) ||
+                AtsTypeSystemCompatibility.IsExperimental(getter) ||
+                getter.IsObsolete)
+            ? getter
+            : setter;
 
-    /// <summary>
-    /// Maps an enum type ID to the generated TypeScript enum name.
-    /// Throws if the enum type wasn't collected during scanning.
-    /// </summary>
-    private string MapEnumType(string typeId)
-    {
-        if (!_enumTypeNames.TryGetValue(typeId, out var enumName))
+        if (capability is not null)
         {
-            throw new InvalidOperationException(
-                $"Enum type '{typeId}' was not found in the scanned enum types. " +
-                $"This indicates the enum type was not discovered during assembly scanning.");
+            WriteCapabilityDocComment(indent, capability);
         }
-        return enumName;
     }
 
-    /// <summary>
-    /// Maps a union type to TypeScript union syntax (T1 | T2 | ...).
-    /// </summary>
-    private string MapUnionTypeToTypeScript(AtsTypeRef typeRef)
+    private void WriteDocumentationComment(
+        string indent,
+        AtsDocumentationInfo? documentation,
+        string? fallbackSummary = null,
+        IReadOnlyList<(string Name, string? Summary)>? parameters = null,
+        string? returns = null,
+        bool suppressReturns = false,
+        bool isExperimental = false,
+        bool isObsolete = false,
+        string? obsoleteMessage = null)
     {
-        if (typeRef.UnionTypes == null || typeRef.UnionTypes.Count == 0)
+        var lines = new List<string>();
+        AddDocumentationLines(lines, documentation?.Summary ?? fallbackSummary);
+        AddDocumentationLines(lines, documentation?.Remarks, addBlankLineBefore: lines.Count > 0);
+
+        foreach (var parameter in parameters ?? [])
         {
-            return "unknown";
+            AddTaggedDocumentationLines(lines, $"@param {parameter.Name}", parameter.Summary);
         }
 
-        var memberTypes = typeRef.UnionTypes
-            .Select(MapTypeRefToTypeScript)
-            .Distinct();
-
-        return string.Join(" | ", memberTypes);
-    }
-
-    /// <summary>
-    /// Gets the wrapper class name or handle type name for a handle type ID.
-    /// Prefers wrapper class if one exists, otherwise generates a handle type name.
-    /// </summary>
-    private string GetWrapperOrHandleName(string typeId)
-    {
-        if (_wrapperClassNames.TryGetValue(typeId, out var wrapperClassName))
+        if (!suppressReturns)
         {
-            return wrapperClassName;
-        }
-        return GetHandleTypeName(typeId);
-    }
-
-    /// <summary>
-    /// Gets a TypeScript interface name for a DTO type.
-    /// </summary>
-    private static string GetDtoInterfaceName(string typeId)
-    {
-        // Extract simple type name and use as interface name
-        var simpleTypeName = ExtractSimpleTypeName(typeId);
-        return simpleTypeName;
-    }
-
-    /// <summary>
-    /// Maps a parameter to its TypeScript type, handling callbacks specially.
-    /// For interface handle types, generates union types to accept both handles and wrapper classes.
-    /// </summary>
-    private string MapParameterToTypeScript(AtsParameterInfo param)
-    {
-        if (param.IsCallback)
-        {
-            return GenerateCallbackTypeSignature(param.CallbackParameters, param.CallbackReturnType);
+            AddTaggedDocumentationLines(lines, "@returns", returns ?? documentation?.Returns);
         }
 
-        var baseType = MapTypeRefToTypeScript(param.Type);
-
-        // For interface handle types, use ResourceBuilderBase as the parameter type
-        // All wrapper classes extend ResourceBuilderBase and have toJSON() for serialization
-        if (IsInterfaceHandleType(param.Type))
+        if (isExperimental)
         {
-            return "ResourceBuilderBase";
+            lines.Add("@experimental");
         }
 
-        return baseType;
+        if (isObsolete)
+        {
+            lines.Add(string.IsNullOrWhiteSpace(obsoleteMessage)
+                ? "@deprecated"
+                : $"@deprecated {EscapeJSDocText(obsoleteMessage)}");
+        }
+
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        if (lines.Count == 1 && !lines[0].StartsWith('@'))
+        {
+            WriteLine($"{indent}/** {lines[0]} */");
+            return;
+        }
+
+        WriteLine($"{indent}/**");
+        foreach (var line in lines)
+        {
+            WriteLine(line.Length == 0 ? $"{indent} *" : $"{indent} * {line}");
+        }
+        WriteLine($"{indent} */");
     }
 
-    /// <summary>
-    /// Checks if a type reference is an interface handle type.
-    /// Interface handles need union types to accept wrapper classes.
-    /// </summary>
-    private static bool IsInterfaceHandleType(AtsTypeRef? typeRef)
+    private static void AddTaggedDocumentationLines(List<string> lines, string tag, string? text)
     {
-        if (typeRef == null)
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        var tagLines = SplitDocumentationLines(text);
+        if (tagLines.Count == 0)
+        {
+            return;
+        }
+
+        lines.Add($"{tag} {tagLines[0]}");
+        foreach (var line in tagLines.Skip(1))
+        {
+            lines.Add(line);
+        }
+    }
+
+    private static void AddDocumentationLines(List<string> lines, string? text, bool addBlankLineBefore = false)
+    {
+        var textLines = SplitDocumentationLines(text);
+        if (textLines.Count == 0)
+        {
+            return;
+        }
+
+        if (addBlankLineBefore)
+        {
+            lines.Add(string.Empty);
+        }
+
+        lines.AddRange(textLines);
+    }
+
+    private static List<string> SplitDocumentationLines(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return [];
+        }
+
+        return text
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(EscapeJSDocText)
+            .ToList();
+    }
+
+    private static string EscapeJSDocText(string text) =>
+        ConvertAtsReferencesToJsDocLinks(text).Replace("*/", "* /", StringComparison.Ordinal);
+
+    private static string ConvertAtsReferencesToJsDocLinks(string text)
+    {
+        const string markerStart = "{@ats-ref ";
+
+        var startIndex = text.IndexOf(markerStart, StringComparison.Ordinal);
+        if (startIndex < 0)
+        {
+            return text;
+        }
+
+        var builder = new StringBuilder(text.Length);
+        var currentIndex = 0;
+
+        while (startIndex >= 0)
+        {
+            builder.Append(text, currentIndex, startIndex - currentIndex);
+
+            var markerBodyStartIndex = startIndex + markerStart.Length;
+            var markerEndIndex = text.IndexOf('}', markerBodyStartIndex);
+            if (markerEndIndex < 0)
+            {
+                builder.Append(text, startIndex, text.Length - startIndex);
+                return builder.ToString();
+            }
+
+            var markerBody = text[markerBodyStartIndex..markerEndIndex];
+            var labelSeparatorIndex = markerBody.IndexOf('|', StringComparison.Ordinal);
+            var reference = labelSeparatorIndex < 0 ? markerBody : markerBody[..labelSeparatorIndex];
+            var label = labelSeparatorIndex < 0 ? null : markerBody[(labelSeparatorIndex + 1)..];
+            var targetSeparatorIndex = reference.IndexOf(':', StringComparison.Ordinal);
+
+            if (targetSeparatorIndex < 0 || targetSeparatorIndex == reference.Length - 1)
+            {
+                builder.Append(text, startIndex, markerEndIndex - startIndex + 1);
+            }
+            else
+            {
+                var target = reference[(targetSeparatorIndex + 1)..];
+                builder.Append("{@link ").Append(target);
+                if (!string.IsNullOrWhiteSpace(label))
+                {
+                    builder.Append('|').Append(label);
+                }
+
+                builder.Append('}');
+            }
+
+            currentIndex = markerEndIndex + 1;
+            startIndex = text.IndexOf(markerStart, currentIndex, StringComparison.Ordinal);
+        }
+
+        builder.Append(text, currentIndex, text.Length - currentIndex);
+        return builder.ToString();
+    }
+
+    private static string GetRpcArgumentValueExpression(string parameterName, AtsTypeRef? typeRef)
+    {
+        if (TypeScriptApiProjector.IsCancellationTokenType(typeRef))
+        {
+            return $"CancellationToken.fromValue({parameterName})";
+        }
+
+        return parameterName;
+    }
+
+    private static string GetLocalParameterName(AtsParameterInfo parameter)
+    {
+        // ES modules are always strict mode, where "arguments" cannot be used as
+        // a local binding name. Keep the wire/API name unchanged and only rename
+        // the generated implementation variable.
+        return parameter.Name == "arguments" ? "argumentsValue" : parameter.Name;
+    }
+
+    private static string GetRpcArgumentEntry(string parameterName, AtsTypeRef? typeRef)
+    {
+        var valueExpression = GetRpcArgumentValueExpression(parameterName, typeRef);
+        return valueExpression == parameterName
+            ? parameterName
+            : $"{parameterName}: {valueExpression}";
+    }
+
+    private static string GetRpcArgumentExpression(AtsParameterInfo param, string localParameterName, bool useRegisteredCallback = true)
+    {
+        if (useRegisteredCallback && param.IsCallback)
+        {
+            return $"{localParameterName}Id";
+        }
+
+        return GetRpcArgumentValueExpression(localParameterName, param.Type);
+    }
+
+    private string GetRpcArgumentEntryForParam(AtsParameterInfo param, string localParameterName, bool useRegisteredCallback = true)
+    {
+        if (useRegisteredCallback && param.IsCallback)
+        {
+            return $"{param.Name}: {localParameterName}Id";
+        }
+
+        var valueExpression = GetRpcArgumentExpressionForParam(param, localParameterName, useRegisteredCallback);
+        return valueExpression == param.Name
+            ? param.Name
+            : $"{param.Name}: {valueExpression}";
+    }
+
+    private string GetRpcArgumentExpressionForParam(AtsParameterInfo param, string localParameterName, bool useRegisteredCallback = true)
+    {
+        if (TryGetDtoCallbackMarshallingProperties(param.Type, out _))
+        {
+            return GetDtoRpcLocalName(localParameterName);
+        }
+
+        return GetRpcArgumentExpression(param, localParameterName, useRegisteredCallback);
+    }
+
+    private bool TryGetDtoCallbackMarshallingProperties(AtsTypeRef? typeRef, out List<AtsDtoPropertyInfo> marshallingProperties)
+    {
+        marshallingProperties = [];
+
+        if (typeRef?.Category != AtsTypeCategory.Dto ||
+            !_projector.DtoTypesById.TryGetValue(typeRef.TypeId, out var dtoType))
         {
             return false;
         }
-        return typeRef.Category == AtsTypeCategory.Handle && typeRef.IsInterface;
+
+        marshallingProperties = dtoType.Properties
+            .Where(p => p.IsCallback || RequiresDtoCallbackMarshalling(p.Type))
+            .ToList();
+
+        return marshallingProperties.Count > 0;
     }
+
+    private bool RequiresDtoCallbackMarshalling(AtsTypeRef? typeRef, HashSet<string>? visitedDtoTypeIds = null)
+    {
+        if (typeRef?.Category != AtsTypeCategory.Dto ||
+            !_projector.DtoTypesById.TryGetValue(typeRef.TypeId, out var dtoType))
+        {
+            return false;
+        }
+
+        visitedDtoTypeIds ??= new(StringComparer.Ordinal);
+        if (!visitedDtoTypeIds.Add(typeRef.TypeId))
+        {
+            return false;
+        }
+
+        try
+        {
+            return dtoType.Properties.Any(p => p.IsCallback || RequiresDtoCallbackMarshalling(p.Type, visitedDtoTypeIds));
+        }
+        finally
+        {
+            visitedDtoTypeIds.Remove(typeRef.TypeId);
+        }
+    }
+
+    private static string GetDtoRpcLocalName(string localParameterName) => $"__{localParameterName}ForRpc";
+
+    private static string GetDtoCallbackLocalName(string dtoLocalName, string propertyName) => $"__{dtoLocalName}{propertyName}";
 
     /// <summary>
     /// Gets the TypeId from a capability's return type.
@@ -280,39 +436,18 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     {
         var files = new Dictionary<string, string>();
 
-        // Add embedded resource files (transport.ts, base.ts)
-        files["transport.ts"] = GetEmbeddedResource("transport.ts");
-        files["base.ts"] = GetEmbeddedResource("base.ts");
+        // Add embedded resource files (transport.mts, base.mts)
+        files["transport.mts"] = EmbeddedResources.Read("transport.mts");
+        files["base.mts"] = EmbeddedResources.Read("base.mts");
 
-        // Generate the capability-based aspire.ts SDK
-        files["aspire.ts"] = GenerateAspireSdk(context);
+        // Generate the capability-based aspire.mts SDK
+        files["aspire.mts"] = GenerateAspireSdk(context);
 
         return files;
     }
 
-    private static string GetEmbeddedResource(string name)
-    {
-        var assembly = Assembly.GetExecutingAssembly();
-        var resourceName = $"Aspire.Hosting.CodeGeneration.TypeScript.Resources.{name}";
-
-        using var stream = assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Embedded resource '{name}' not found.");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
-    }
-
     /// <summary>
-    /// Gets a valid TypeScript method name from a capability method name.
-    /// Handles dotted names like "EnvironmentContext.resource" by extracting just the final part.
-    /// </summary>
-    private static string GetTypeScriptMethodName(string methodName)
-    {
-        var dotIndex = methodName.LastIndexOf('.');
-        return dotIndex >= 0 ? methodName[(dotIndex + 1)..] : methodName;
-    }
-
-    /// <summary>
-    /// Generates the aspire.ts SDK file with capability-based API.
+    /// Generates the aspire.mts SDK file with capability-based API.
     /// </summary>
     private string GenerateAspireSdk(AtsContext context)
     {
@@ -321,82 +456,74 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
 
         // Header
         WriteLine("""
-            // aspire.ts - Capability-based Aspire SDK
+            // aspire.mts - Capability-based Aspire SDK
             // This SDK uses the ATS (Aspire Type System) capability API.
             // Capabilities are endpoints like 'Aspire.Hosting/createBuilder'.
             //
             // GENERATED CODE - DO NOT EDIT
 
             import {
-                AspireClient as AspireClientRpc,
+                AspireClient,
                 Handle,
                 MarshalledHandle,
+                AppHostUsageError,
+                CancellationToken,
                 CapabilityError,
                 registerCallback,
                 wrapIfHandle,
-                registerHandleWrapper
-            } from './transport.js';
+                registerHandleWrapper,
+                isPromiseLike
+            } from './transport.mjs';
+            import type { AspireClientRpc } from './transport.mjs';
+
+            import type { HandleReference } from './base.mjs';
 
             import {
                 ResourceBuilderBase,
                 ReferenceExpression,
                 refExpr,
                 AspireDict,
-                AspireList
-            } from './base.js';
+                AspireList,
+                createFluentPromiseClass as $aspireCreateFluentPromiseClass,
+                InteractionInputCollectionPromiseImpl
+            } from './base.mjs';
+
+            export {
+                InputType,
+                InteractionInputCollection
+            } from './base.mjs';
+
+            export type {
+                InteractionInput,
+                InteractionInputOption,
+                InteractionInputCollectionPromise
+            } from './base.mjs';
+
+            import type {
+                Awaitable,
+                FluentPromiseTransitions as $aspireFluentPromiseTransitions,
+                InteractionInput,
+                InteractionInputCollection,
+                InteractionInputCollectionPromise,
+                InputType
+            } from './base.mjs';
             """);
         WriteLine();
 
-        var capabilities = context.Capabilities;
+        // Resolve every TypeScript-specific decision once. The canonical API exporter consumes the
+        // same projector, so documented signatures cannot drift from the signatures emitted here.
+        _projector = new TypeScriptApiProjector(context);
+        var resolved = _projector.Resolved;
+
         var dtoTypes = context.DtoTypes;
         var enumTypes = context.EnumTypes;
+        var exportedValues = context.ExportedValues;
 
-        // Get builder models (flattened - each builder has all its applicable capabilities)
-        var allBuilders = CreateBuilderModels(capabilities);
-        var entryPoints = GetEntryPointCapabilities(capabilities);
-
-        // All builders (no special filtering)
-        var builders = allBuilders;
-
-        // Entry point methods that don't extend any type go on AspireClient
-        var clientMethods = entryPoints
-            .Where(c => string.IsNullOrEmpty(c.TargetTypeId))
-            .ToList();
-
-        // Collect all unique type IDs for handle type aliases
-        // Exclude DTO types - they have their own interfaces, not handle aliases
-        var dtoTypeIds = new HashSet<string>(dtoTypes.Select(d => d.TypeId));
-        var typeIds = new HashSet<string>();
-        foreach (var cap in capabilities)
-        {
-            if (!string.IsNullOrEmpty(cap.TargetTypeId) && !dtoTypeIds.Contains(cap.TargetTypeId))
-            {
-                typeIds.Add(cap.TargetTypeId);
-            }
-            if (IsHandleType(cap.ReturnType) && !dtoTypeIds.Contains(cap.ReturnType!.TypeId))
-            {
-                typeIds.Add(GetReturnTypeId(cap)!);
-            }
-            // Add parameter type IDs (for types like IResourceBuilder<IResource>)
-            foreach (var param in cap.Parameters)
-            {
-                if (IsHandleType(param.Type) && !dtoTypeIds.Contains(param.Type!.TypeId))
-                {
-                    typeIds.Add(param.Type!.TypeId);
-                }
-                // Also collect callback parameter types
-                if (param.IsCallback && param.CallbackParameters != null)
-                {
-                    foreach (var cbParam in param.CallbackParameters)
-                    {
-                        if (IsHandleType(cbParam.Type) && !dtoTypeIds.Contains(cbParam.Type.TypeId))
-                        {
-                            typeIds.Add(cbParam.Type.TypeId);
-                        }
-                    }
-                }
-            }
-        }
+        var builders = resolved.Builders;
+        var resourceBuilders = resolved.ResourceBuilders;
+        var typeClasses = resolved.TypeClasses;
+        var clientMethods = resolved.ClientMethods;
+        var typeIds = resolved.HandleTypeIds;
 
         // Generate handle type aliases
         GenerateHandleTypeAliases(typeIds);
@@ -407,50 +534,8 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         // Generate DTO interfaces
         GenerateDtoInterfaces(dtoTypes);
 
-        // Separate builders into categories:
-        // 1. Resource builders: IResource*, ContainerResource, etc.
-        // 2. Type classes: everything else (context types, wrapper types)
-        var resourceBuilders = builders.Where(b => b.TargetType?.IsResourceBuilder == true).ToList();
-        var typeClasses = builders.Where(b => b.TargetType?.IsResourceBuilder != true).ToList();
-
-        // Build wrapper class name mapping for type resolution BEFORE generating options interfaces
-        // This allows parameter types to use wrapper class names instead of handle types
-        _wrapperClassNames.Clear();
-        _typesWithPromiseWrappers.Clear();
-        _generatedOptionsInterfaces.Clear();
-        _optionsInterfacesToGenerate.Clear();
-
-        foreach (var builder in resourceBuilders)
-        {
-            _wrapperClassNames[builder.TypeId] = builder.BuilderClassName;
-            // All resource builders get Promise wrappers
-            _typesWithPromiseWrappers.Add(builder.TypeId);
-        }
-        foreach (var typeClass in typeClasses)
-        {
-            _wrapperClassNames[typeClass.TypeId] = DeriveClassName(typeClass.TypeId);
-            // Type classes with methods get Promise wrappers
-            if (HasChainableMethods(typeClass))
-            {
-                _typesWithPromiseWrappers.Add(typeClass.TypeId);
-            }
-        }
-        // Add ReferenceExpression (defined in base.ts, not generated)
-        _wrapperClassNames[AtsConstants.ReferenceExpressionTypeId] = "ReferenceExpression";
-
-        // Pre-scan all capabilities to collect options interfaces
-        // This must happen AFTER wrapper class names are populated so types resolve correctly
-        foreach (var builder in builders)
-        {
-            foreach (var cap in builder.Capabilities)
-            {
-                var (_, optionalParams) = SeparateParameters(cap.Parameters);
-                if (optionalParams.Count > 0)
-                {
-                    RegisterOptionsInterface(cap.MethodName, optionalParams);
-                }
-            }
-        }
+        // Generate exported immutable values
+        GenerateExportedValues(exportedValues);
 
         // Generate collected options interfaces
         GenerateOptionsInterfaces();
@@ -508,13 +593,18 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
 
         foreach (var typeId in typeIds.OrderBy(t => t))
         {
-            var handleName = GetHandleTypeName(typeId);
-            var description = GetTypeDescription(typeId);
-            WriteLine($"/** {description} */");
+            var handleName = TypeScriptApiProjector.GetHandleTypeName(typeId);
+            var description = TypeScriptApiProjector.GetTypeDescription(typeId);
+            WriteDocumentationComment(string.Empty, GetHandleDocumentation(typeId), description);
             // Internal type alias - not exported (users work with wrapper classes)
             WriteLine($"type {handleName} = Handle<'{typeId}'>;");
             WriteLine();
         }
+    }
+
+    private AtsDocumentationInfo? GetHandleDocumentation(string typeId)
+    {
+        return _projector.HandleDocumentationById.GetValueOrDefault(typeId);
     }
 
     /// <summary>
@@ -522,7 +612,11 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// </summary>
     private void GenerateEnumTypes(IReadOnlyList<AtsEnumTypeInfo> enumTypes)
     {
-        if (enumTypes.Count == 0)
+        var generatedEnumTypes = enumTypes
+            .Where(enumType => enumType.TypeId != TypeScriptApiProjector.InputTypeTypeId)
+            .ToList();
+
+        if (generatedEnumTypes.Count == 0)
         {
             return;
         }
@@ -532,18 +626,20 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine("// ============================================================================");
         WriteLine();
 
-        foreach (var enumType in enumTypes.OrderBy(e => e.Name))
+        foreach (var enumType in generatedEnumTypes.OrderBy(e => e.Name))
         {
-            // Track enum name for type mapping
-            _enumTypeNames[enumType.TypeId] = enumType.Name;
-
-            WriteLine($"/** Enum type for {enumType.Name} */");
+            WriteDocumentationComment(string.Empty, enumType.Documentation, $"Enum type for {enumType.Name}");
             WriteLine($"export enum {enumType.Name} {{");
 
-            foreach (var value in enumType.Values)
+            var enumValues = enumType.ValueInfos.Count > 0
+                ? enumType.ValueInfos
+                : enumType.Values.Select(value => new AtsEnumValueInfo { Name = value }).ToList();
+
+            foreach (var value in enumValues)
             {
                 // Enums serialize as strings in JSON
-                WriteLine($"    {value} = \"{value}\",");
+                WriteDocumentationComment("    ", value.Documentation);
+                WriteLine($"    {value.Name} = \"{value.Name}\",");
             }
 
             WriteLine("}");
@@ -556,7 +652,11 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// </summary>
     private void GenerateDtoInterfaces(IReadOnlyList<AtsDtoTypeInfo> dtoTypes)
     {
-        if (dtoTypes.Count == 0)
+        var generatedDtoTypes = dtoTypes
+            .Where(dto => dto.TypeId != TypeScriptApiProjector.InteractionInputTypeId)
+            .ToList();
+
+        if (generatedDtoTypes.Count == 0)
         {
             return;
         }
@@ -566,20 +666,31 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine("// ============================================================================");
         WriteLine();
 
-        foreach (var dto in dtoTypes.OrderBy(d => d.Name))
+        foreach (var dto in generatedDtoTypes.OrderBy(d => d.Name))
         {
-            var interfaceName = GetDtoInterfaceName(dto.TypeId);
+            var interfaceName = TypeScriptApiProjector.GetDtoInterfaceName(dto.TypeId);
 
-            WriteLine($"/** DTO interface for {dto.Name} */");
+            WriteDocumentationComment(string.Empty, dto.Documentation, dto.Description ?? $"DTO interface for {dto.Name}");
             WriteLine($"export interface {interfaceName} {{");
 
             foreach (var prop in dto.Properties)
             {
-                var tsType = MapTypeRefToTypeScript(prop.Type);
+                var tsType = prop.IsCallback
+                    ? _projector.GenerateCallbackTypeSignature(prop.CallbackParameters, prop.CallbackReturnType)
+                    : _projector.MapDtoPropertyTypeToTypeScript(prop.Type);
                 // All DTO properties are optional in TypeScript to allow partial objects
                 // Convert PascalCase to camelCase for TypeScript
-                var propName = ToCamelCase(prop.Name);
+                var propName = TypeScriptApiProjector.ToCamelCase(prop.Name);
+                WriteDocumentationComment("    ", prop.Documentation, prop.Description);
                 WriteLine($"    {propName}?: {tsType};");
+            }
+
+            // Client-only properties have no C# counterpart. The list lives on the projector so the
+            // exported API surface describes the same interface this emits.
+            foreach (var clientOnly in TypeScriptApiProjector.GetClientOnlyDtoProperties(interfaceName))
+            {
+                WriteLine($"    /** {clientOnly.Summary} */");
+                WriteLine($"    {clientOnly.Name}?: {clientOnly.Type};");
             }
 
             WriteLine("}");
@@ -587,91 +698,24 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         }
     }
 
-    /// <summary>
-    /// Converts a PascalCase name to camelCase.
-    /// </summary>
-    private static string ToCamelCase(string name)
+    private void GenerateExportedValues(IReadOnlyList<AtsExportedValueInfo> exportedValues)
     {
-        if (string.IsNullOrEmpty(name))
-        {
-            return name;
-        }
-        if (char.IsLower(name[0]))
-        {
-            return name;
-        }
-        return char.ToLowerInvariant(name[0]) + name[1..];
-    }
-
-    /// <summary>
-    /// Converts a camelCase name to PascalCase.
-    /// </summary>
-    private static string ToPascalCase(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            return name;
-        }
-        if (char.IsUpper(name[0]))
-        {
-            return name;
-        }
-        return char.ToUpperInvariant(name[0]) + name[1..];
-    }
-
-    /// <summary>
-    /// Gets the options interface name for a method.
-    /// Strips any type prefix (e.g., "TypeName.methodName" -> "MethodName").
-    /// </summary>
-    private static string GetOptionsInterfaceName(string methodName)
-    {
-        // Strip type prefix if present (e.g., "EndpointReference.getExpression" -> "getExpression")
-        var simpleName = methodName.Contains('.')
-            ? methodName[(methodName.LastIndexOf('.') + 1)..]
-            : methodName;
-        return $"{ToPascalCase(simpleName)}Options";
-    }
-
-    /// <summary>
-    /// Separates parameters into required and optional lists.
-    /// Required = not optional and not nullable.
-    /// </summary>
-    private static (List<AtsParameterInfo> Required, List<AtsParameterInfo> Optional) SeparateParameters(
-        IEnumerable<AtsParameterInfo> parameters)
-    {
-        var required = new List<AtsParameterInfo>();
-        var optional = new List<AtsParameterInfo>();
-
-        foreach (var param in parameters)
-        {
-            if (param.IsOptional || param.IsNullable)
-            {
-                optional.Add(param);
-            }
-            else
-            {
-                required.Add(param);
-            }
-        }
-
-        return (required, optional);
-    }
-
-    /// <summary>
-    /// Registers an options interface to be generated later.
-    /// Uses method name to create the interface name.
-    /// </summary>
-    private void RegisterOptionsInterface(string methodName, List<AtsParameterInfo> optionalParams)
-    {
-        if (optionalParams.Count == 0)
+        if (exportedValues.Count == 0)
         {
             return;
         }
 
-        var interfaceName = GetOptionsInterfaceName(methodName);
-        if (_generatedOptionsInterfaces.Add(interfaceName))
+        var namespaces = _projector.ProjectExportedValues(exportedValues);
+
+        WriteLine("// ============================================================================");
+        WriteLine("// Exported Values");
+        WriteLine("// ============================================================================");
+        WriteLine();
+
+        foreach (var exportedNamespace in namespaces)
         {
-            _optionsInterfacesToGenerate[interfaceName] = optionalParams;
+            WriteLine(exportedNamespace.Content);
+            WriteLine();
         }
     }
 
@@ -680,7 +724,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// </summary>
     private void GenerateOptionsInterfaces()
     {
-        if (_optionsInterfacesToGenerate.Count == 0)
+        if (_projector.OptionsInterfacesToGenerate.Count == 0)
         {
             return;
         }
@@ -690,12 +734,13 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine("// ============================================================================");
         WriteLine();
 
-        foreach (var (interfaceName, optionalParams) in _optionsInterfacesToGenerate.OrderBy(kvp => kvp.Key))
+        foreach (var (interfaceName, optionalParams) in _projector.OptionsInterfacesToGenerate.OrderBy(kvp => kvp.Key))
         {
             WriteLine($"export interface {interfaceName} {{");
             foreach (var param in optionalParams)
             {
-                var tsType = MapParameterToTypeScript(param);
+                var tsType = _projector.MapParameterToTypeScript(param);
+                WriteDocumentationComment("    ", param.Documentation);
                 WriteLine($"    {param.Name}?: {tsType};");
             }
             WriteLine("}");
@@ -703,23 +748,271 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         }
     }
 
-    private static string GetTypeDescription(string typeId)
+    private void GenerateGetterOnlyPropertyPromiseSignature(string propertyName, AtsCapabilityInfo getter)
     {
-        var typeName = ExtractSimpleTypeName(typeId);
-        return $"Handle to {typeName}";
+        var returnType = _projector.GetGetterOnlyPropertyMethodReturnType(getter.ReturnType);
+        WriteCapabilityDocComment("    ", getter);
+        WriteLine($"    {propertyName}(): {returnType};");
+    }
+
+    private void GenerateInterfaceProperty(string propertyName, AtsCapabilityInfo? getter, AtsCapabilityInfo? setter)
+    {
+        if (TypeScriptApiProjector.IsGetterOnlyProperty(getter, setter))
+        {
+            GenerateGetterOnlyPropertyPromiseSignature(propertyName, getter!);
+            return;
+        }
+
+        if (getter?.ReturnType is { } returnType)
+        {
+            if (TypeScriptApiProjector.IsDictionaryType(returnType))
+            {
+                var keyType = returnType.KeyType != null ? _projector.MapTypeRefToTypeScript(returnType.KeyType) : "string";
+                var valueType = returnType.ValueType != null ? _projector.MapTypeRefToTypeScript(returnType.ValueType) : "unknown";
+                WritePropertyDocComment("    ", getter, setter);
+                WriteLine($"    readonly {propertyName}: AspireDict<{keyType}, {valueType}>;");
+                return;
+            }
+
+            if (TypeScriptApiProjector.IsListType(returnType))
+            {
+                var elementType = returnType.ElementType != null ? _projector.MapTypeRefToTypeScript(returnType.ElementType) : "unknown";
+                WritePropertyDocComment("    ", getter, setter);
+                WriteLine($"    readonly {propertyName}: AspireList<{elementType}>;");
+                return;
+            }
+        }
+
+        WritePropertyDocComment("    ", getter, setter);
+        WriteLine($"    {propertyName}: {{");
+
+        if (getter != null)
+        {
+            if (_projector.TryGetPromiseWrapperType(getter.ReturnType, out var promiseInterfaceName, out _))
+            {
+                WriteLine($"        get: () => {promiseInterfaceName};");
+            }
+            else
+            {
+                var returnTypeName = _projector.MapTypeRefToTypeScript(getter.ReturnType);
+                WriteLine($"        get: () => Promise<{returnTypeName}>;");
+            }
+        }
+
+        if (setter != null)
+        {
+            var valueParam = setter.Parameters.FirstOrDefault(p => p.Name == "value");
+            if (valueParam != null)
+            {
+                var valueType = _projector.MapInputTypeToTypeScript(valueParam.Type);
+                WriteLine($"        set: (value: {valueType}) => Promise<void>;");
+            }
+        }
+
+        WriteLine("    };");
+    }
+
+    private void GenerateBuilderInterface(BuilderModel builder)
+    {
+        var interfaceName = TypeScriptApiProjector.GetInterfaceName(builder.BuilderClassName);
+
+        WriteLine("// ============================================================================");
+        WriteLine($"// {interfaceName}");
+        WriteLine("// ============================================================================");
+        WriteLine();
+        WriteDocumentationComment(string.Empty, GetHandleDocumentation(builder.TypeId));
+        WriteLine($"export interface {interfaceName} {{");
+        WriteLine("    toJSON(): MarshalledHandle;");
+
+        var getters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertyGetter).ToList();
+        var setters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
+        if (getters.Count > 0 || setters.Count > 0)
+        {
+            var properties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters);
+            foreach (var prop in properties)
+            {
+                GenerateInterfaceProperty(prop.PropertyName, prop.Getter, prop.Setter);
+            }
+        }
+
+        foreach (var capability in builder.Capabilities.Where(c =>
+            c.CapabilityKind != AtsCapabilityKind.PropertyGetter &&
+            c.CapabilityKind != AtsCapabilityKind.PropertySetter))
+        {
+            var signature = _projector.ResolveMethodSignature(builder, capability);
+            var hasNonBuilderReturn = !capability.ReturnsBuilder && capability.ReturnType != null;
+
+            WriteCapabilityDocComment("    ", capability, signature.RequiredParameters, signature.OptionsParameter?.Name);
+            if (hasNonBuilderReturn)
+            {
+                if (_projector.TryGetPromiseWrapperType(capability.ReturnType, out var promiseInterfaceName, out _))
+                {
+                    WriteLine($"    {capability.MethodName}({signature.ParameterList}): {promiseInterfaceName};");
+                }
+                else
+                {
+                    var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
+                    WriteLine($"    {capability.MethodName}({signature.ParameterList}): Promise<{returnType}>;");
+                }
+            }
+            else
+            {
+                WriteLine($"    {capability.MethodName}({signature.ParameterList}): {_projector.GetBuilderPromiseInterfaceForMethod(builder, capability)};");
+            }
+        }
+
+        WriteLine("}");
+        WriteLine();
+    }
+
+    private void GenerateBuilderPromiseInterface(BuilderModel builder)
+    {
+        if (!_projector.TypesWithPromiseWrappers.Contains(builder.TypeId))
+        {
+            return;
+        }
+
+        var capabilities = builder.Capabilities.Where(c =>
+            c.CapabilityKind != AtsCapabilityKind.PropertyGetter &&
+            c.CapabilityKind != AtsCapabilityKind.PropertySetter).ToList();
+        var getters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertyGetter).ToList();
+        var setters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
+        var getterOnlyProperties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters)
+            .Where(p => TypeScriptApiProjector.IsGetterOnlyProperty(p.Getter, p.Setter))
+            .ToList();
+
+        var interfaceName = TypeScriptApiProjector.GetInterfaceName(builder.BuilderClassName);
+        var promiseInterfaceName = TypeScriptApiProjector.GetPromiseInterfaceName(builder.BuilderClassName);
+
+        WriteLine($"export interface {promiseInterfaceName} extends PromiseLike<{interfaceName}> {{");
+
+        foreach (var prop in getterOnlyProperties)
+        {
+            GenerateGetterOnlyPropertyPromiseSignature(prop.PropertyName, prop.Getter!);
+        }
+
+        foreach (var capability in capabilities)
+        {
+            var signature = _projector.ResolveMethodSignature(builder, capability);
+            var hasNonBuilderReturn = !capability.ReturnsBuilder && capability.ReturnType != null;
+
+            WriteCapabilityDocComment("    ", capability, signature.RequiredParameters, signature.OptionsParameter?.Name);
+            if (hasNonBuilderReturn)
+            {
+                if (_projector.TryGetPromiseWrapperType(capability.ReturnType, out var returnPromiseInterfaceName, out _))
+                {
+                    WriteLine($"    {capability.MethodName}({signature.ParameterList}): {returnPromiseInterfaceName};");
+                }
+                else
+                {
+                    var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
+                    WriteLine($"    {capability.MethodName}({signature.ParameterList}): Promise<{returnType}>;");
+                }
+            }
+            else
+            {
+                WriteLine($"    {capability.MethodName}({signature.ParameterList}): {_projector.GetBuilderPromiseInterfaceForMethod(builder, capability)};");
+            }
+        }
+
+        WriteLine("}");
+        WriteLine();
+    }
+
+    private void GenerateTypeClassInterfaceMethod(BuilderModel model, string className, AtsCapabilityInfo capability)
+    {
+        var signature = _projector.ResolveMethodSignature(model, capability);
+        var isVoid = capability.ReturnType == null || capability.ReturnType.TypeId == AtsConstants.Void;
+
+        WriteCapabilityDocComment("    ", capability, signature.RequiredParameters, signature.OptionsParameter?.Name);
+        if (capability.ReturnType != null && _projector.TypesWithPromiseWrappers.Contains(capability.ReturnType.TypeId))
+        {
+            WriteLine($"    {signature.MethodName}({signature.ParameterList}): {_projector.GetPublicPromiseInterfaceName(capability.ReturnType.TypeId)};");
+        }
+        else if (isVoid)
+        {
+            WriteLine($"    {signature.MethodName}({signature.ParameterList}): {TypeScriptApiProjector.GetPromiseInterfaceName(className)};");
+        }
+        else
+        {
+            var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
+            WriteLine($"    {signature.MethodName}({signature.ParameterList}): Promise<{returnType}>;");
+        }
+    }
+
+    private void GenerateTypeClassInterface(BuilderModel model)
+    {
+        var className = TypeScriptApiProjector.DeriveClassName(model.TypeId);
+        var interfaceName = TypeScriptApiProjector.GetInterfaceName(className);
+
+        WriteLine("// ============================================================================");
+        WriteLine($"// {interfaceName}");
+        WriteLine("// ============================================================================");
+        WriteLine();
+        WriteDocumentationComment(string.Empty, GetHandleDocumentation(model.TypeId));
+        WriteLine($"export interface {interfaceName} {{");
+        WriteLine("    toJSON(): MarshalledHandle;");
+
+        var getters = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertyGetter).ToList();
+        var setters = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
+        var contextMethods = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.InstanceMethod).ToList();
+        var otherMethods = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.Method).ToList();
+        var standardMethods = contextMethods.Concat(otherMethods).ToList();
+        var hasMethods = standardMethods.Count > 0;
+
+        var properties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters);
+        var getterOnlyProperties = properties
+            .Where(p => TypeScriptApiProjector.IsGetterOnlyProperty(p.Getter, p.Setter))
+            .ToList();
+        foreach (var prop in properties)
+        {
+            GenerateInterfaceProperty(prop.PropertyName, prop.Getter, prop.Setter);
+        }
+
+        foreach (var method in standardMethods)
+        {
+            GenerateTypeClassInterfaceMethod(model, className, method);
+        }
+
+        WriteLine("}");
+        WriteLine();
+
+        if (!hasMethods && getterOnlyProperties.Count == 0)
+        {
+            return;
+        }
+
+        var promiseInterfaceName = TypeScriptApiProjector.GetPromiseInterfaceName(className);
+        WriteLine($"export interface {promiseInterfaceName} extends PromiseLike<{interfaceName}> {{");
+        foreach (var prop in getterOnlyProperties)
+        {
+            GenerateGetterOnlyPropertyPromiseSignature(prop.PropertyName, prop.Getter!);
+        }
+        foreach (var method in standardMethods)
+        {
+            GenerateTypeClassInterfaceMethod(model, className, method);
+        }
+        WriteLine("}");
+        WriteLine();
     }
 
     private void GenerateBuilderClass(BuilderModel builder)
     {
+        GenerateBuilderInterface(builder);
+        GenerateBuilderPromiseInterface(builder);
+
+        var implementationClassName = TypeScriptApiProjector.GetImplementationClassName(builder.BuilderClassName);
+
         WriteLine("// ============================================================================");
-        WriteLine($"// {builder.BuilderClassName}");
+        WriteLine($"// {implementationClassName}");
         WriteLine("// ============================================================================");
         WriteLine();
 
-        var handleType = GetHandleTypeName(builder.TypeId);
+        var handleType = TypeScriptApiProjector.GetHandleTypeName(builder.TypeId);
 
         // Generate builder class extending ResourceBuilderBase
-        WriteLine($"export class {builder.BuilderClassName} extends ResourceBuilderBase<{handleType}> {{");
+        WriteDocumentationComment(string.Empty, GetHandleDocumentation(builder.TypeId));
+        WriteLine($"class {implementationClassName} extends ResourceBuilderBase<{handleType}> implements {builder.BuilderClassName} {{");
 
         // Constructor
         WriteLine($"    constructor(handle: {handleType}, client: AspireClientRpc) {{");
@@ -732,7 +1025,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         var setters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
         if (getters.Count > 0 || setters.Count > 0)
         {
-            var properties = GroupPropertiesByName(getters, setters);
+            var properties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters);
             foreach (var prop in properties)
             {
                 GeneratePropertyLikeObject(prop.PropertyName, prop.Getter, prop.Setter);
@@ -756,41 +1049,61 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         GenerateThenableClass(builder);
     }
 
+    /// <summary>
+    /// Generates both an internal async method and a public fluent method for a builder capability.
+    /// </summary>
+    /// <remarks>
+    /// <para>Produces a pair of methods: a private <c>_*Internal</c> method that performs the RPC call,
+    /// and a public method that wraps it in a thenable promise class for fluent chaining.</para>
+    /// <para>Generated TypeScript (example for <c>withEnvironment</c> on <c>RedisResource</c>):</para>
+    /// <code>
+    /// /** @internal */
+    /// private async _withEnvironmentInternal(name: string, value: string): Promise&lt;RedisResource&gt; {
+    ///     const rpcArgs: Record&lt;string, unknown&gt; = { builder: this._handle, name, value };
+    ///     const result = await this._client.invokeCapability&lt;RedisResourceHandle&gt;('...', rpcArgs);
+    ///     return new RedisResourceImpl(result, this._client);
+    /// }
+    ///
+    /// withEnvironment(name: string, value: string): RedisResourcePromise {
+    ///     return new RedisResourcePromiseImpl(
+    ///         this._withEnvironmentInternal(name, value), this._client);
+    /// }
+    ///
+    /// // For build(), the public wrapper flushes pending promises first:
+    /// build(): DistributedApplicationPromise {
+    ///     const flushAndBuild = async () =&gt; { await this._client.flushPendingPromises(); return this._buildInternal(); };
+    ///     return new DistributedApplicationPromiseImpl(flushAndBuild(), this._client, false);
+    /// }
+    /// </code>
+    /// <para>When a parameter is a handle type, promise resolution is emitted before the RPC args
+    /// (e.g. <c>db = isPromiseLike(db) ? await db : db;</c>).</para>
+    /// </remarks>
     private void GenerateBuilderMethod(BuilderModel builder, AtsCapabilityInfo capability)
     {
         var methodName = capability.MethodName;
         var internalMethodName = $"_{methodName}Internal";
+        var targetParamName = capability.TargetParameterName ?? "builder";
+        var userParams = capability.Parameters.Where(p => p.Name != targetParamName).ToList();
 
         // Separate required and optional parameters
-        var (requiredParams, optionalParams) = SeparateParameters(capability.Parameters);
+        var (requiredParams, optionalParams) = TypeScriptApiProjector.SeparateParameters(userParams);
         var hasOptionals = optionalParams.Count > 0;
-        var optionsInterfaceName = GetOptionsInterfaceName(methodName);
+        var hasDirectOptionsParameter = TypeScriptApiProjector.TryGetDirectOptionsParameter(optionalParams, out var directOptionsParam);
+        var optionsTypeName = hasDirectOptionsParameter ? _projector.MapParameterToTypeScript(directOptionsParam!) : _projector.ResolveOptionsInterfaceName(capability);
+        var publicOptionsParamName = TypeScriptApiProjector.GetImplementationOptionsParameterName(userParams, hasOptionals, hasDirectOptionsParameter);
 
         // Build parameter list for public method
-        var publicParamDefs = new List<string>();
-        foreach (var param in requiredParams)
-        {
-            var tsType = MapParameterToTypeScript(param);
-            publicParamDefs.Add($"{param.Name}: {tsType}");
-        }
-        if (hasOptionals)
-        {
-            publicParamDefs.Add($"options?: {optionsInterfaceName}");
-        }
-        var publicParamsString = string.Join(", ", publicParamDefs);
+        var publicParamsString = _projector.BuildPublicParameterList(requiredParams, hasOptionals, optionsTypeName, publicOptionsParamName, TypeScriptApiProjector.GetTrailingCancellationTokenParameter(optionalParams));
 
         // Build parameter list for internal method (all params positional for callback registration)
         var internalParamDefs = new List<string>();
-        foreach (var param in capability.Parameters)
+        foreach (var param in userParams)
         {
-            var tsType = MapParameterToTypeScript(param);
+            var tsType = _projector.MapParameterToTypeScript(param);
             var optional = param.IsOptional || param.IsNullable ? "?" : "";
             internalParamDefs.Add($"{param.Name}{optional}: {tsType}");
         }
         var internalParamsString = string.Join(", ", internalParamDefs);
-
-        // Use the actual target parameter name from the capability (e.g., "resource" for withReference)
-        var targetParamName = capability.TargetParameterName ?? "builder";
 
         // Determine return type - for factory methods returning a different builder type,
         // use the return type's class name instead of the receiver's.
@@ -805,56 +1118,102 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             !string.Equals(capability.ReturnType.TypeId, capability.TargetTypeId, StringComparison.Ordinal))
         {
             returnTypeId = capability.ReturnType.TypeId;
-            returnClassName = _wrapperClassNames.GetValueOrDefault(returnTypeId)
-                ?? DeriveClassName(returnTypeId);
+            returnClassName = _projector.WrapperClassNames.GetValueOrDefault(returnTypeId)
+                ?? TypeScriptApiProjector.DeriveClassName(returnTypeId);
         }
         var returnHandle = capability.ReturnsBuilder
-            ? GetHandleTypeName(returnTypeId)
+            ? _projector.GetConcreteHandleTypeName(returnTypeId)
             : "void";
         var returnsBuilder = capability.ReturnsBuilder;
+        var returnImplementationClassName = TypeScriptApiProjector.GetImplementationClassName(returnClassName);
 
         // Check if this method returns a non-builder, non-void type (e.g., getEndpoint returns EndpointReference)
         var hasNonBuilderReturn = !returnsBuilder && capability.ReturnType != null;
         if (hasNonBuilderReturn)
         {
-            // Generate a simple async method that returns the actual type
-            var returnType = MapTypeRefToTypeScript(capability.ReturnType);
-
-            if (!string.IsNullOrEmpty(capability.Description))
+            if (_projector.TryGetPromiseWrapperType(capability.ReturnType, out var returnPromiseInterfaceName, out var returnPromiseImplementationClassName))
             {
-                WriteLine($"    /** {capability.Description} */");
+                var wrappedReturnTypeId = capability.ReturnType!.TypeId;
+                var wrappedReturnClassName = _projector.GetConcreteClassName(wrappedReturnTypeId);
+                var returnImplementationClassNameForWrapper = TypeScriptApiProjector.GetImplementationClassName(wrappedReturnClassName);
+                var returnHandleType = _projector.GetConcreteHandleTypeName(wrappedReturnTypeId);
+
+                WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
+                Write($"    {methodName}(");
+                Write(publicParamsString);
+                WriteLine($"): {returnPromiseInterfaceName} {{");
+                WriteLine("        const promise = (async () => {");
+
+                foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
+                {
+                    var localParameterName = GetLocalParameterName(param);
+                    WriteLine($"            {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
+                }
+
+                var callbackParamsForPromiseWrapper = userParams.Where(p => p.IsCallback).ToList();
+                foreach (var callbackParam in callbackParamsForPromiseWrapper)
+                {
+                    GenerateCallbackRegistration(callbackParam, "            ");
+                }
+
+                GeneratePromiseResolution(userParams, "            ");
+                GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams, useSafeOptionalLocalNames: true, indent: "            ");
+
+                WriteLine($"            const handle = await this._client.invokeCapability<{returnHandleType}>(");
+                WriteLine($"                '{capability.CapabilityId}',");
+                WriteLine("                rpcArgs");
+                WriteLine("            );");
+                WriteLine($"            return new {returnImplementationClassNameForWrapper}(handle, this._client);");
+                WriteLine("        })();");
+                WriteLine($"        return new {returnPromiseImplementationClassName}(promise, this._client);");
+                WriteLine("    }");
+                WriteLine();
+                return;
             }
+
+            // Generate a simple async method that returns the actual type
+            var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
+
+            WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
             Write($"    async {methodName}(");
             Write(publicParamsString);
             WriteLine($"): Promise<{returnType}> {{");
 
             // Extract optional params from options object
-            foreach (var param in optionalParams)
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
             {
-                WriteLine($"        const {param.Name} = options?.{param.Name};");
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
             }
 
             // Handle callback registration if any
-            var callbackParams2 = capability.Parameters.Where(p => p.IsCallback).ToList();
+            var callbackParams2 = userParams.Where(p => p.IsCallback).ToList();
             foreach (var callbackParam in callbackParams2)
             {
                 GenerateCallbackRegistration(callbackParam);
             }
 
-            // Handle cancellation token registration if any
-            var cancellationParams2 = capability.Parameters.Where(IsCancellationToken).ToList();
-            foreach (var ctParam in cancellationParams2)
-            {
-                GenerateCancellationRegistration(ctParam);
-            }
+            // Resolve any promise-like handle parameters before building rpcArgs
+            GeneratePromiseResolution(userParams);
 
             // Build args object with conditional inclusion
-            GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams, cancellationParams2);
+            GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams, useSafeOptionalLocalNames: true);
 
-            WriteLine($"        return await this._client.invokeCapability<{returnType}>(");
-            WriteLine($"            '{capability.CapabilityId}',");
-            WriteLine($"            rpcArgs");
-            WriteLine("        );");
+            if (capability.ReturnType?.TypeId == AtsConstants.CancellationToken)
+            {
+                WriteLine("        const result = await this._client.invokeCapability<string | null>(");
+                WriteLine($"            '{capability.CapabilityId}',");
+                WriteLine("            rpcArgs");
+                WriteLine("        );");
+                WriteLine("        return CancellationToken.fromValue(result);");
+            }
+            else
+            {
+                WriteLine($"        return await this._client.invokeCapability<{returnType}>(");
+                WriteLine($"            '{capability.CapabilityId}',");
+                WriteLine($"            rpcArgs");
+                WriteLine("        );");
+            }
             WriteLine("    }");
             WriteLine();
             return;
@@ -868,21 +1227,17 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine();
 
         // Handle callback registration if any
-        var callbackParams = capability.Parameters.Where(p => p.IsCallback).ToList();
+        var callbackParams = userParams.Where(p => p.IsCallback).ToList();
         foreach (var callbackParam in callbackParams)
         {
             GenerateCallbackRegistration(callbackParam);
         }
 
-        // Handle cancellation token registration if any
-        var cancellationParams = capability.Parameters.Where(IsCancellationToken).ToList();
-        foreach (var ctParam in cancellationParams)
-        {
-            GenerateCancellationRegistration(ctParam);
-        }
+        // Resolve any promise-like handle parameters before building rpcArgs
+        GeneratePromiseResolution(userParams);
 
         // Build args object with conditional inclusion
-        GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams, cancellationParams);
+        GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams);
 
         if (returnsBuilder)
         {
@@ -890,7 +1245,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             WriteLine($"            '{capability.CapabilityId}',");
             WriteLine($"            rpcArgs");
             WriteLine("        );");
-            WriteLine($"        return new {returnClassName}(result, this._client);");
+            WriteLine($"        return new {returnImplementationClassName}(result, this._client);");
         }
         else
         {
@@ -904,29 +1259,139 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine();
 
         // Generate public fluent method (returns thenable wrapper)
-        if (!string.IsNullOrEmpty(capability.Description))
-        {
-            WriteLine($"    /** {capability.Description} */");
-        }
         var promiseClass = $"{returnClassName}Promise";
+        var promiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(returnClassName);
+        WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
         Write($"    {methodName}(");
         Write(publicParamsString);
         Write($"): {promiseClass} {{");
         WriteLine();
 
         // Extract optional params from options object and forward to internal method
-        foreach (var param in optionalParams)
+        foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
         {
-            WriteLine($"        const {param.Name} = options?.{param.Name};");
+            var localParameterName = GetLocalParameterName(param);
+            WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
         }
 
         // Forward all params to internal method
-        var allParamNames = capability.Parameters.Select(p => p.Name);
-        Write($"        return new {promiseClass}(this.{internalMethodName}(");
-        Write(string.Join(", ", allParamNames));
-        WriteLine("));");
+        var allParamNames = userParams.Select(p => optionalParams.Contains(p) ? GetLocalParameterName(p) : p.Name);
+        var internalCall = $"this.{internalMethodName}({string.Join(", ", allParamNames)})";
+
+        // For build(), flush pending promises before invoking the internal method.
+        // This must happen in the public wrapper (not _buildInternal) to avoid deadlock:
+        // the PromiseImpl constructor tracks the build promise, and if _buildInternal
+        // awaited flushPendingPromises, the flush would re-await the tracked build promise.
+        if (string.Equals(capability.MethodName, "build", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteLine($"        const flushAndBuild = async () => {{ await this._client.flushPendingPromises(); return {internalCall}; }};");
+            // Don't track the build promise — it wraps flushPendingPromises which
+            // may throw AggregateError. Tracking it would re-add that error to
+            // _rejectedErrors, poisoning subsequent build() calls.
+            WriteLine($"        return new {promiseImplementationClass}(flushAndBuild(), this._client, false);");
+        }
+        else
+        {
+            WriteLine($"        return new {promiseImplementationClass}({internalCall}, this._client);");
+        }
         WriteLine("    }");
         WriteLine();
+    }
+
+    /// <summary>
+    /// Generates promise resolution code for handle-type parameters that may be PromiseLike.
+    /// </summary>
+    /// <remarks>
+    /// For each parameter whose type is a handle (or union containing handles), emits a line
+    /// that awaits it if it is a <c>PromiseLike</c>. Non-handle and callback parameters are skipped.
+    /// <code>
+    /// // For a handle-type param 'db':
+    /// db = isPromiseLike(db) ? await db : db;
+    ///
+    /// // For a non-handle param 'name' (string): nothing emitted
+    /// </code>
+    /// </remarks>
+    private void GeneratePromiseResolution(IReadOnlyList<AtsParameterInfo> parameters, string indent = "        ")
+    {
+        foreach (var param in parameters)
+        {
+            if (param.IsCallback)
+            {
+                continue;
+            }
+
+            if (_projector.IsWidenedHandleType(param.Type))
+            {
+                WriteLine($"{indent}{param.Name} = isPromiseLike({param.Name}) ? await {param.Name} : {param.Name};");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Generates promise resolution for a single named parameter.
+    /// </summary>
+    /// <remarks>
+    /// Used for property setters where only the <c>value</c> parameter needs resolution.
+    /// <code>
+    /// // For a handle-type 'value' parameter:
+    /// value = isPromiseLike(value) ? await value : value;
+    /// </code>
+    /// </remarks>
+    private void GeneratePromiseResolutionForParam(string paramName, AtsTypeRef? paramType, string indent = "        ")
+    {
+        if (_projector.IsWidenedHandleType(paramType))
+        {
+            WriteLine($"{indent}{paramName} = isPromiseLike({paramName}) ? await {paramName} : {paramName};");
+        }
+    }
+
+    /// <summary>
+    /// Generates promise resolution and args object construction in one step.
+    /// This is the unified helper used by builder methods, type class methods, context methods, and wrapper methods.
+    /// </summary>
+    /// <remarks>
+    /// Combines <see cref="GeneratePromiseResolution"/> with RPC args construction.
+    /// Required parameters are inlined in the object literal; optional parameters
+    /// are added conditionally.
+    /// <code>
+    /// // Example output for a method with required 'name', handle-type 'db', and optional 'timeout':
+    /// db = isPromiseLike(db) ? await db : db;
+    /// const rpcArgs: Record&lt;string, unknown&gt; = { builder: this._handle, name, db };
+    /// if (timeout !== undefined) rpcArgs.timeout = timeout;
+    /// </code>
+    /// </remarks>
+    private void GenerateResolveAndBuildArgs(
+        string targetParamName,
+        IReadOnlyList<AtsParameterInfo> allParams,
+        List<AtsParameterInfo> requiredParams,
+        List<AtsParameterInfo> optionalParams,
+        bool useSafeOptionalLocalNames = false,
+        string indent = "        ")
+    {
+        // Resolve any promise-like handle parameters
+        GeneratePromiseResolution(allParams, indent);
+
+        // DTO callback properties are sent over the wire as callback IDs, just like direct
+        // callback parameters. Copy the DTO before replacing function-valued properties so
+        // callers keep their original options object unchanged.
+        GenerateDtoCallbackPropertyMarshalling(requiredParams.Concat(optionalParams), useSafeOptionalLocalNames, indent);
+
+        // Build the required args inline
+        var requiredArgs = new List<string> { $"{targetParamName}: this._handle" };
+        foreach (var param in requiredParams)
+        {
+            requiredArgs.Add(GetRpcArgumentEntryForParam(param, param.Name));
+        }
+
+        WriteLine($"{indent}const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
+
+        // Conditionally add optional params
+        foreach (var param in optionalParams)
+        {
+            var localParameterName = useSafeOptionalLocalNames ? GetLocalParameterName(param) : param.Name;
+            var rpcExpression = GetRpcArgumentExpressionForParam(param, localParameterName);
+            WriteLine($"{indent}if ({localParameterName} !== undefined) rpcArgs.{param.Name} = {rpcExpression};");
+        }
     }
 
     /// <summary>
@@ -936,152 +1401,258 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         string targetParamName,
         List<AtsParameterInfo> requiredParams,
         List<AtsParameterInfo> optionalParams,
-        List<AtsParameterInfo>? cancellationParams = null)
+        bool useSafeOptionalLocalNames = false,
+        string indent = "        ")
     {
-        var cancellationParamNames = new HashSet<string>(cancellationParams?.Select(p => p.Name) ?? []);
+        // DTO callback properties are sent over the wire as callback IDs, just like direct
+        // callback parameters. Copy the DTO before replacing function-valued properties so
+        // callers keep their original options object unchanged.
+        GenerateDtoCallbackPropertyMarshalling(requiredParams.Concat(optionalParams), useSafeOptionalLocalNames, indent);
 
         // Build the required args inline
         var requiredArgs = new List<string> { $"{targetParamName}: this._handle" };
         foreach (var param in requiredParams)
         {
-            if (param.IsCallback)
-            {
-                // Use the actual parameter name for the RPC call, not a hardcoded "callback"
-                requiredArgs.Add($"{param.Name}: {param.Name}Id");
-            }
-            else if (cancellationParamNames.Contains(param.Name))
-            {
-                // Use the registered cancellation ID
-                requiredArgs.Add($"{param.Name}: {param.Name}Id");
-            }
-            else
-            {
-                requiredArgs.Add(param.Name);
-            }
+            requiredArgs.Add(GetRpcArgumentEntryForParam(param, param.Name));
         }
 
-        WriteLine($"        const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
+        WriteLine($"{indent}const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
 
         // Conditionally add optional params
         foreach (var param in optionalParams)
         {
-            var isCancellation = cancellationParamNames.Contains(param.Name);
-            var argName = param.IsCallback || isCancellation ? $"{param.Name}Id" : param.Name;
-            var paramName = param.Name;
-            // Use the actual parameter name for the RPC call
-            WriteLine($"        if ({paramName} !== undefined) rpcArgs.{paramName} = {argName};");
+            var localParameterName = useSafeOptionalLocalNames ? GetLocalParameterName(param) : param.Name;
+            var rpcExpression = GetRpcArgumentExpressionForParam(param, localParameterName);
+            WriteLine($"{indent}if ({localParameterName} !== undefined) rpcArgs.{param.Name} = {rpcExpression};");
         }
     }
 
-    private void GenerateThenableClass(BuilderModel builder)
+    private void GenerateDtoCallbackPropertyMarshalling(
+        IEnumerable<AtsParameterInfo> parameters,
+        bool useSafeOptionalLocalNames,
+        string indent,
+        string clientExpression = "this._client")
     {
-        var promiseClass = $"{builder.BuilderClassName}Promise";
-
-        WriteLine($"/**");
-        WriteLine($" * Thenable wrapper for {builder.BuilderClassName} that enables fluent chaining.");
-        WriteLine($" * @example");
-        WriteLine($" * await builder.addSomething().withX().withY();");
-        WriteLine($" */");
-        WriteLine($"export class {promiseClass} implements PromiseLike<{builder.BuilderClassName}> {{");
-        WriteLine($"    constructor(private _promise: Promise<{builder.BuilderClassName}>) {{}}");
-        WriteLine();
-
-        // Generate then() for PromiseLike interface
-        WriteLine($"    then<TResult1 = {builder.BuilderClassName}, TResult2 = never>(");
-        WriteLine($"        onfulfilled?: ((value: {builder.BuilderClassName}) => TResult1 | PromiseLike<TResult1>) | null,");
-        WriteLine("        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null");
-        WriteLine("    ): PromiseLike<TResult1 | TResult2> {");
-        WriteLine("        return this._promise.then(onfulfilled, onrejected);");
-        WriteLine("    }");
-        WriteLine();
-
-        // Generate fluent methods that chain via .then()
-        // Capabilities are already flattened - no need to collect from parents
-        // Filter out property getters and setters - they are not methods
-        foreach (var capability in builder.Capabilities.Where(c =>
-            c.CapabilityKind != AtsCapabilityKind.PropertyGetter &&
-            c.CapabilityKind != AtsCapabilityKind.PropertySetter))
+        foreach (var param in parameters)
         {
-            var methodName = capability.MethodName;
-
-            // Separate required and optional parameters
-            var (requiredParams, optionalParams) = SeparateParameters(capability.Parameters);
-            var hasOptionals = optionalParams.Count > 0;
-            var optionsInterfaceName = GetOptionsInterfaceName(methodName);
-
-            // Build parameter list using options pattern
-            var publicParamDefs = new List<string>();
-            foreach (var param in requiredParams)
+            if (!TryGetDtoCallbackMarshallingProperties(param.Type, out var marshallingProperties))
             {
-                var tsType = MapParameterToTypeScript(param);
-                publicParamDefs.Add($"{param.Name}: {tsType}");
-            }
-            if (hasOptionals)
-            {
-                publicParamDefs.Add($"options?: {optionsInterfaceName}");
-            }
-            var paramsString = string.Join(", ", publicParamDefs);
-
-            // Forward args to underlying object's method (which handles options extraction)
-            var forwardArgs = new List<string>();
-            foreach (var param in requiredParams)
-            {
-                forwardArgs.Add(param.Name);
-            }
-            if (hasOptionals)
-            {
-                forwardArgs.Add("options");
-            }
-            var argsString = string.Join(", ", forwardArgs);
-
-            // Check if this method returns a non-builder type
-            var hasNonBuilderReturn = !capability.ReturnsBuilder && capability.ReturnType != null;
-
-            if (!string.IsNullOrEmpty(capability.Description))
-            {
-                WriteLine($"    /** {capability.Description} */");
+                continue;
             }
 
-            if (hasNonBuilderReturn)
+            if (param.Type is not { TypeId: var dtoTypeId })
             {
-                // For non-builder returns, call the public method directly
-                var returnType = MapTypeRefToTypeScript(capability.ReturnType);
-                Write($"    {methodName}(");
-                Write(paramsString);
-                WriteLine($"): Promise<{returnType}> {{");
-                Write($"        return this._promise.then(obj => obj.{methodName}(");
-                Write(argsString);
-                WriteLine("));");
-                WriteLine("    }");
+                continue;
+            }
+
+            var localParameterName = useSafeOptionalLocalNames ? GetLocalParameterName(param) : param.Name;
+            var dtoRpcLocalName = GetDtoRpcLocalName(localParameterName);
+            var visitedDtoTypeIds = new HashSet<string>(StringComparer.Ordinal) { dtoTypeId };
+            if (param.IsOptional || param.IsNullable)
+            {
+                WriteLine($"{indent}const {dtoRpcLocalName} = {localParameterName} === undefined || {localParameterName} === null ? {localParameterName} : {{ ...{localParameterName} }};");
+                WriteLine($"{indent}if ({dtoRpcLocalName} !== undefined && {dtoRpcLocalName} !== null) {{");
+                GenerateDtoCallbackPropertyAssignments(dtoRpcLocalName, marshallingProperties, visitedDtoTypeIds, $"{indent}    ", clientExpression);
+                WriteLine($"{indent}}}");
             }
             else
             {
-                // For fluent builder methods, determine the correct promise class.
-                // Factory methods returning a different builder type use the return type's promise class.
-                var methodPromiseClass = promiseClass;
-                if (capability.ReturnsBuilder && capability.ReturnType?.TypeId != null &&
-                    !string.Equals(capability.ReturnType.TypeId, builder.TypeId, StringComparison.Ordinal) &&
-                    !string.Equals(capability.ReturnType.TypeId, capability.TargetTypeId, StringComparison.Ordinal))
-                {
-                    var returnClass = _wrapperClassNames.GetValueOrDefault(capability.ReturnType.TypeId)
-                        ?? DeriveClassName(capability.ReturnType.TypeId);
-                    methodPromiseClass = $"{returnClass}Promise";
-                }
-
-                Write($"    {methodName}(");
-                Write(paramsString);
-                Write($"): {methodPromiseClass} {{");
-                WriteLine();
-                // Forward to the public method on the underlying object, wrapping result in promise class
-                Write($"        return new {methodPromiseClass}(this._promise.then(obj => obj.{methodName}(");
-                Write(argsString);
-                WriteLine(")));");
-                WriteLine("    }");
+                WriteLine($"{indent}const {dtoRpcLocalName} = {localParameterName} === null ? {localParameterName} : {{ ...{localParameterName} }};");
+                WriteLine($"{indent}if ({dtoRpcLocalName} !== null) {{");
+                GenerateDtoCallbackPropertyAssignments(dtoRpcLocalName, marshallingProperties, visitedDtoTypeIds, $"{indent}    ", clientExpression);
+                WriteLine($"{indent}}}");
             }
-            WriteLine();
+        }
+    }
+
+    private void GenerateDtoCallbackPropertyAssignments(
+        string dtoRpcLocalName,
+        IReadOnlyList<AtsDtoPropertyInfo> marshallingProperties,
+        HashSet<string> visitedDtoTypeIds,
+        string indent,
+        string clientExpression)
+    {
+        var dtoDataLocalName = $"{dtoRpcLocalName}Data";
+        WriteLine($"{indent}const {dtoDataLocalName} = {dtoRpcLocalName} as Record<string, unknown>;");
+
+        foreach (var marshallingProperty in marshallingProperties)
+        {
+            if (marshallingProperty.IsCallback)
+            {
+                var propertyName = TypeScriptApiProjector.ToCamelCase(marshallingProperty.Name);
+                var callbackLocalName = GetDtoCallbackLocalName(dtoRpcLocalName, marshallingProperty.Name);
+                WriteLine($"{indent}const {callbackLocalName} = {dtoRpcLocalName}.{propertyName};");
+                WriteLine($"{indent}if ({callbackLocalName} !== undefined) {{");
+                GenerateCallbackRegistration(CreateCallbackParameter(marshallingProperty, callbackLocalName), $"{indent}    ", clientExpression);
+                WriteLine($"{indent}    {dtoDataLocalName}[\"{propertyName}\"] = {callbackLocalName}Id;");
+                WriteLine($"{indent}}}");
+                continue;
+            }
+
+            GenerateNestedDtoCallbackPropertyAssignments(dtoRpcLocalName, dtoDataLocalName, marshallingProperty, visitedDtoTypeIds, indent, clientExpression);
+        }
+    }
+
+    private void GenerateNestedDtoCallbackPropertyAssignments(
+        string dtoRpcLocalName,
+        string dtoDataLocalName,
+        AtsDtoPropertyInfo dtoProperty,
+        HashSet<string> visitedDtoTypeIds,
+        string indent,
+        string clientExpression)
+    {
+        if (!TryGetDtoCallbackMarshallingProperties(dtoProperty.Type, out var nestedMarshallingProperties))
+        {
+            return;
         }
 
-        WriteLine("}");
+        var propertyName = TypeScriptApiProjector.ToCamelCase(dtoProperty.Name);
+        var dtoPropertyLocalName = GetDtoCallbackLocalName(dtoRpcLocalName, dtoProperty.Name);
+        var nestedDtoRpcLocalName = $"{dtoPropertyLocalName}ForRpc";
+
+        if (!visitedDtoTypeIds.Add(dtoProperty.Type.TypeId))
+        {
+            return;
+        }
+
+        try
+        {
+            WriteLine($"{indent}const {dtoPropertyLocalName} = {dtoRpcLocalName}.{propertyName};");
+            WriteLine($"{indent}if ({dtoPropertyLocalName} !== undefined && {dtoPropertyLocalName} !== null) {{");
+            WriteLine($"{indent}    const {nestedDtoRpcLocalName} = {{ ...{dtoPropertyLocalName} }};");
+            GenerateDtoCallbackPropertyAssignments(nestedDtoRpcLocalName, nestedMarshallingProperties, visitedDtoTypeIds, $"{indent}    ", clientExpression);
+            WriteLine($"{indent}    {dtoDataLocalName}[\"{propertyName}\"] = {nestedDtoRpcLocalName};");
+            WriteLine($"{indent}}}");
+        }
+        finally
+        {
+            visitedDtoTypeIds.Remove(dtoProperty.Type.TypeId);
+        }
+    }
+
+    private static AtsParameterInfo CreateCallbackParameter(AtsDtoPropertyInfo callbackProperty, string callbackLocalName)
+        => new()
+        {
+            Name = callbackLocalName,
+            Type = callbackProperty.Type,
+            IsOptional = callbackProperty.IsOptional,
+            IsNullable = callbackProperty.Type.IsNullable == true,
+            IsCallback = true,
+            CallbackParameters = callbackProperty.CallbackParameters,
+            CallbackReturnType = callbackProperty.CallbackReturnType
+        };
+
+    /// <summary>
+    /// Generates a thenable wrapper class for a builder that enables fluent chaining.
+    /// </summary>
+    /// <remarks>
+    /// <para>The generated constructor delegates runtime forwarding to <c>FluentPromise</c>. A compact
+    /// transition table identifies members whose results need another fluent wrapper.</para>
+    /// <para>Generated TypeScript (example for <c>RedisResource</c>):</para>
+    /// <code>
+    /// const RedisResourcePromiseImpl = $aspireCreateFluentPromiseClass&lt;RedisResource, RedisResourcePromise&gt;(() =&gt; ({
+    ///     withEnvironment: () =&gt; RedisResourcePromiseImpl,
+    /// }));
+    /// </code>
+    /// </remarks>
+    private void GenerateThenableClass(BuilderModel builder)
+    {
+        if (!_projector.TypesWithPromiseWrappers.Contains(builder.TypeId))
+        {
+            return;
+        }
+
+        var capabilities = builder.Capabilities.Where(c =>
+            c.CapabilityKind != AtsCapabilityKind.PropertyGetter &&
+            c.CapabilityKind != AtsCapabilityKind.PropertySetter).ToList();
+        var getters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertyGetter).ToList();
+        var setters = builder.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
+        var getterOnlyProperties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters)
+            .Where(p => TypeScriptApiProjector.IsGetterOnlyProperty(p.Getter, p.Setter))
+            .ToList();
+
+        var promiseClass = $"{builder.BuilderClassName}Promise";
+        var promiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(builder.BuilderClassName);
+        var transitions = new Dictionary<string, (string? PromiseImplementationClass, bool Track, bool TrackTransitions)>(StringComparer.Ordinal);
+
+        foreach (var prop in getterOnlyProperties)
+        {
+            if (_projector.TryGetPromiseWrapperType(prop.Getter!.ReturnType, out _, out var promiseImplementationClassName))
+            {
+                transitions[prop.PropertyName] = (promiseImplementationClassName, Track: false, TrackTransitions: true);
+            }
+            else
+            {
+                transitions[prop.PropertyName] = (PromiseImplementationClass: null, Track: false, TrackTransitions: true);
+            }
+        }
+
+        foreach (var capability in capabilities)
+        {
+            var signature = _projector.ResolveMethodSignature(builder, capability);
+            var methodName = signature.MethodName;
+            // build() flushes tracked promises. Its wrapper and any synchronously chained
+            // transitions must stay untracked because they depend on that flush completing.
+            var isBuild = string.Equals(methodName, "build", StringComparison.OrdinalIgnoreCase);
+            var trackTransition = !isBuild;
+            var hasNonBuilderReturn = !capability.ReturnsBuilder && capability.ReturnType != null;
+            if (hasNonBuilderReturn)
+            {
+                if (_projector.TryGetPromiseWrapperType(capability.ReturnType, out _, out var returnPromiseImplementationClassName))
+                {
+                    transitions[methodName] = (returnPromiseImplementationClassName, Track: trackTransition, TrackTransitions: !isBuild);
+                }
+                else
+                {
+                    transitions[methodName] = (PromiseImplementationClass: null, Track: false, TrackTransitions: true);
+                }
+                continue;
+            }
+
+            var methodPromiseImplementationClass = promiseImplementationClass;
+            if (capability.ReturnsBuilder && capability.ReturnType?.TypeId != null &&
+                !string.Equals(capability.ReturnType.TypeId, builder.TypeId, StringComparison.Ordinal) &&
+                !string.Equals(capability.ReturnType.TypeId, capability.TargetTypeId, StringComparison.Ordinal))
+            {
+                var returnClass = _projector.WrapperClassNames.GetValueOrDefault(capability.ReturnType.TypeId)
+                    ?? TypeScriptApiProjector.DeriveClassName(capability.ReturnType.TypeId);
+                methodPromiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(returnClass);
+            }
+
+            transitions[methodName] = (methodPromiseImplementationClass, Track: trackTransition, TrackTransitions: !isBuild);
+        }
+
+        GenerateFluentPromiseImplementation(builder.BuilderClassName, promiseClass, promiseImplementationClass, transitions);
+    }
+
+    private void GenerateFluentPromiseImplementation(
+        string className,
+        string promiseClass,
+        string promiseImplementationClass,
+        IReadOnlyDictionary<string, (string? PromiseImplementationClass, bool Track, bool TrackTransitions)> transitions)
+    {
+        WriteLine("/** @internal */");
+        WriteLine($"const {promiseImplementationClass} = $aspireCreateFluentPromiseClass<{className}, {promiseClass}>((): $aspireFluentPromiseTransitions => ({{");
+        foreach (var (methodName, transition) in transitions)
+        {
+            var methodNameLiteral = $"\"{JsonEncodedText.Encode(methodName)}\"";
+            if (transition.PromiseImplementationClass is null)
+            {
+                WriteLine($"    [{methodNameLiteral}]: null,");
+                continue;
+            }
+
+            var constructorProvider = $"() => {transition.PromiseImplementationClass}";
+            var transitionExpression = (transition.Track, transition.TrackTransitions) switch
+            {
+                (true, true) => constructorProvider,
+                (true, false) => $"[{constructorProvider}, true, false] as const",
+                (false, true) => $"[{constructorProvider}, false] as const",
+                (false, false) => $"[{constructorProvider}, false, false] as const"
+            };
+            WriteLine($"    [{methodNameLiteral}]: {transitionExpression},");
+        }
+        WriteLine("}));");
         WriteLine();
     }
 
@@ -1104,108 +1675,138 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         }
     }
 
+    /// <summary>
+    /// Generates an exported entry-point function that creates a builder via an async IIFE.
+    /// </summary>
+    /// <remarks>
+    /// <para>Entry-point functions are standalone exports (not class methods). They wrap the
+    /// RPC call in an async IIFE and return a thenable promise class for immediate chaining.</para>
+    /// <para>Generated TypeScript (example for <c>createBuilder</c>):</para>
+    /// <code>
+    /// export function createBuilder(client: AspireClientRpc): DistributedApplicationBuilderPromise {
+    ///     const promise = (async () =&gt; {
+    ///         const rpcArgs: Record&lt;string, unknown&gt; = { };
+    ///         const handle = await client.invokeCapability&lt;DistributedApplicationBuilderHandle&gt;(
+    ///             'aspire.capability.createBuilder', rpcArgs);
+    ///         return new DistributedApplicationBuilderImpl(handle, client);
+    ///     })();
+    ///     return new DistributedApplicationBuilderPromiseImpl(promise, client);
+    /// }
+    /// </code>
+    /// </remarks>
     private void GenerateEntryPointFunction(AtsCapabilityInfo capability)
     {
         var methodName = capability.MethodName;
 
-        // Build parameter list
-        var paramDefs = new List<string> { "client: AspireClientRpc" };
-        var paramArgs = new List<string>();
-
-        foreach (var param in capability.Parameters)
-        {
-            var tsType = MapParameterToTypeScript(param);
-            var optional = param.IsOptional || param.IsNullable ? "?" : "";
-            paramDefs.Add($"{param.Name}{optional}: {tsType}");
-            paramArgs.Add(param.Name);
-        }
-
-        var paramsString = string.Join(", ", paramDefs);
-        var argsObject = paramArgs.Count > 0
-            ? $"{{ {string.Join(", ", paramArgs)} }}"
-            : "{}";
+        // Resolved once and shared with the canonical exporter so the emitted function and the
+        // declaration that documents it cannot describe different parameter lists.
+        var signature = _projector.ResolveEntryPointSignature(capability);
+        var paramsString = signature.ParameterList;
+        var (requiredParams, optionalParams) = TypeScriptApiProjector.SeparateParameters(capability.Parameters);
 
         // Determine return type - check if return type has a Promise wrapper
         var capReturnTypeId = GetReturnTypeId(capability);
-        var returnPromiseWrapper = GetPromiseWrapperForReturnType(capability.ReturnType);
+        var returnPromiseWrapper = _projector.GetPromiseWrapperForReturnType(capability.ReturnType);
 
         // Generate JSDoc
-        if (!string.IsNullOrEmpty(capability.Description))
-        {
-            WriteLine($"/**");
-            WriteLine($" * {capability.Description}");
-            WriteLine($" */");
-        }
+        WriteCapabilityDocComment(string.Empty, capability);
 
         // Generate function based on return type
         if (returnPromiseWrapper != null && !string.IsNullOrEmpty(capReturnTypeId))
         {
             // Return type has Promise wrapper - generate fluent function
-            var returnWrapperClass = _wrapperClassNames.GetValueOrDefault(capReturnTypeId)
-                ?? DeriveClassName(capReturnTypeId);
-            var handleType = GetHandleTypeName(capReturnTypeId);
+            var returnWrapperClass = _projector.WrapperClassNames.GetValueOrDefault(capReturnTypeId)
+                ?? TypeScriptApiProjector.DeriveClassName(capReturnTypeId);
+            var returnWrapperImplementationClass = TypeScriptApiProjector.GetImplementationClassName(returnWrapperClass);
+            var returnPromiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(returnWrapperClass);
+            var handleType = _projector.GetConcreteHandleTypeName(capReturnTypeId);
 
             Write($"export function {methodName}(");
             Write(paramsString);
-            WriteLine($"): {returnPromiseWrapper} {{");
-            WriteLine($"    const promise = client.invokeCapability<{handleType}>(");
-            WriteLine($"        '{capability.CapabilityId}',");
-            WriteLine($"        {argsObject}");
-            WriteLine($"    ).then(handle => new {returnWrapperClass}(handle, client));");
-            WriteLine($"    return new {returnPromiseWrapper}(promise);");
+            WriteLine($"): {signature.ReturnType} {{");
+            // Use async IIFE to resolve promise-like handle params before RPC
+            WriteLine($"    const promise = (async () => {{");
+            // Resolve promise-like handle params
+            foreach (var param in capability.Parameters)
+            {
+                if (!param.IsCallback && _projector.IsWidenedHandleType(param.Type))
+                {
+                    WriteLine($"        {param.Name} = isPromiseLike({param.Name}) ? await {param.Name} : {param.Name};");
+                }
+            }
+            GenerateDtoCallbackPropertyMarshalling(capability.Parameters, useSafeOptionalLocalNames: false, indent: "        ", clientExpression: "client");
+            var requiredArgs = requiredParams
+                .Select(param => GetRpcArgumentEntryForParam(param, param.Name, useRegisteredCallback: false))
+                .ToList();
+            WriteLine($"        const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
+            foreach (var param in optionalParams)
+            {
+                WriteLine($"        if ({param.Name} !== undefined) rpcArgs.{param.Name} = {GetRpcArgumentExpressionForParam(param, param.Name, useRegisteredCallback: false)};");
+            }
+            WriteLine($"        const handle = await client.invokeCapability<{handleType}>(");
+            WriteLine($"            '{capability.CapabilityId}',");
+            WriteLine("            rpcArgs");
+            WriteLine("        );");
+            WriteLine($"        return new {returnWrapperImplementationClass}(handle, client);");
+            WriteLine($"    }})();");
+            WriteLine($"    return new {returnPromiseImplementationClass}(promise, client);");
             WriteLine("}");
         }
         else
         {
             // No Promise wrapper - return plain value
             var returnType = !string.IsNullOrEmpty(capReturnTypeId)
-                ? MapTypeRefToTypeScript(capability.ReturnType)
+                ? _projector.MapTypeRefToTypeScript(capability.ReturnType)
                 : "void";
 
             Write($"export async function {methodName}(");
             Write(paramsString);
-            WriteLine($"): Promise<{returnType}> {{");
+            WriteLine($"): {signature.ReturnType} {{");
+            // Resolve promise-like handle params
+            foreach (var param in capability.Parameters)
+            {
+                if (!param.IsCallback && _projector.IsWidenedHandleType(param.Type))
+                {
+                    WriteLine($"    {param.Name} = isPromiseLike({param.Name}) ? await {param.Name} : {param.Name};");
+                }
+            }
+            GenerateDtoCallbackPropertyMarshalling(capability.Parameters, useSafeOptionalLocalNames: false, indent: "    ", clientExpression: "client");
+            var requiredArgs = requiredParams
+                .Select(param => GetRpcArgumentEntryForParam(param, param.Name, useRegisteredCallback: false))
+                .ToList();
+            WriteLine($"    const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
+            foreach (var param in optionalParams)
+            {
+                WriteLine($"    if ({param.Name} !== undefined) rpcArgs.{param.Name} = {GetRpcArgumentExpressionForParam(param, param.Name, useRegisteredCallback: false)};");
+            }
             if (returnType == "void")
             {
                 WriteLine($"    await client.invokeCapability<void>(");
+            }
+            else if (capability.ReturnType?.TypeId == AtsConstants.CancellationToken)
+            {
+                WriteLine("    const result = await client.invokeCapability<string | null>(");
+                WriteLine($"        '{capability.CapabilityId}',");
+                WriteLine("        rpcArgs");
+                WriteLine("    );");
+                WriteLine("    return CancellationToken.fromValue(result);");
+                WriteLine("}");
+                WriteLine();
+                return;
             }
             else
             {
                 WriteLine($"    return await client.invokeCapability<{returnType}>(");
             }
             WriteLine($"        '{capability.CapabilityId}',");
-            WriteLine($"        {argsObject}");
+            WriteLine("        rpcArgs");
             WriteLine("    );");
             WriteLine("}");
         }
         WriteLine();
     }
 
-    private string GenerateCallbackTypeSignature(IReadOnlyList<AtsCallbackParameterInfo>? callbackParameters, AtsTypeRef? callbackReturnType)
-    {
-        // Build parameter list
-        var paramList = new List<string>();
-        if (callbackParameters is not null)
-        {
-            foreach (var param in callbackParameters)
-            {
-                var tsType = MapTypeRefToTypeScript(param.Type);
-                paramList.Add($"{param.Name}: {tsType}");
-            }
-        }
-
-        var paramsString = paramList.Count > 0 ? string.Join(", ", paramList) : "";
-
-        // Determine return type
-        var returnType = callbackReturnType == null || callbackReturnType.TypeId == AtsConstants.Void
-            ? "void"
-            : MapTypeRefToTypeScript(callbackReturnType);
-
-        // Callbacks are always async in TypeScript
-        return $"({paramsString}) => Promise<{returnType}>";
-    }
-
-    private void GenerateCallbackRegistration(AtsParameterInfo callbackParam)
+    private void GenerateCallbackRegistration(AtsParameterInfo callbackParam, string indent = "        ", string clientExpression = "this._client")
     {
         var callbackParameters = callbackParam.CallbackParameters;
         var isOptional = callbackParam.IsOptional || callbackParam.IsNullable;
@@ -1223,66 +1824,40 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         }
         else
         {
-            paramSignature = "argsData: unknown";
+            paramSignature = string.Join(", ", callbackParameters.Select(p => $"{p.Name}Data: unknown"));
         }
 
         // For optional callbacks, wrap the registration in a conditional
         if (isOptional)
         {
-            WriteLine($"        const {callbackName}Id = {callbackName} ? registerCallback(async ({paramSignature}) => {{");
+            WriteLine($"{indent}const {callbackName}Id = {callbackName} ? registerCallback(async ({paramSignature}) => {{");
         }
         else
         {
-            WriteLine($"        const {callbackName}Id = registerCallback(async ({paramSignature}) => {{");
+            WriteLine($"{indent}const {callbackName}Id = registerCallback(async ({paramSignature}) => {{");
         }
 
         // Generate the callback body
-        GenerateCallbackBody(callbackParam, callbackParameters);
+        GenerateCallbackBody(callbackParam, callbackParameters, indent, clientExpression);
 
         // Close the callback registration
         if (isOptional)
         {
-            WriteLine("        }) : undefined;");
+            WriteLine(indent + "}) : undefined;");
         }
         else
         {
-            WriteLine("        });");
-        }
-    }
-
-    /// <summary>
-    /// Checks if a parameter is a CancellationToken type.
-    /// </summary>
-    private static bool IsCancellationToken(AtsParameterInfo param)
-    {
-        return param.Type?.TypeId == AtsConstants.CancellationToken;
-    }
-
-    /// <summary>
-    /// Generates cancellation registration for a CancellationToken parameter.
-    /// </summary>
-    private void GenerateCancellationRegistration(AtsParameterInfo param)
-    {
-        var isOptional = param.IsOptional || param.IsNullable;
-        var paramName = param.Name;
-
-        // For optional cancellation tokens, wrap the registration in a conditional
-        if (isOptional)
-        {
-            WriteLine($"        const {paramName}Id = {paramName} ? registerCancellation({paramName}) : undefined;");
-        }
-        else
-        {
-            WriteLine($"        const {paramName}Id = registerCancellation({paramName});");
+            WriteLine(indent + "});");
         }
     }
 
     /// <summary>
     /// Generates the body of a callback function.
     /// </summary>
-    private void GenerateCallbackBody(AtsParameterInfo callbackParam, IReadOnlyList<AtsCallbackParameterInfo>? callbackParameters)
+    private void GenerateCallbackBody(AtsParameterInfo callbackParam, IReadOnlyList<AtsCallbackParameterInfo>? callbackParameters, string indent, string clientExpression)
     {
         var callbackName = callbackParam.Name;
+        var bodyIndent = $"{indent}    ";
 
         // Check if callback has a return type - if so, we need to return the value
         var hasReturnType = callbackParam.CallbackReturnType != null
@@ -1292,67 +1867,65 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         if (callbackParameters is null || callbackParameters.Count == 0)
         {
             // No parameters - just call the callback
-            WriteLine($"            {returnPrefix}await {callbackName}();");
+            WriteLine($"{bodyIndent}{returnPrefix}await {callbackName}();");
         }
         else if (callbackParameters.Count == 1)
         {
             // Single parameter callback
             var cbParam = callbackParameters[0];
-            var tsType = MapTypeRefToTypeScript(cbParam.Type);
-            var cbTypeId = cbParam.Type.TypeId;
+            GenerateCallbackParameterConversion(cbParam, $"{cbParam.Name}Data", clientExpression, bodyIndent);
 
-            if (_wrapperClassNames.TryGetValue(cbTypeId, out var wrapperClassName))
-            {
-                // For types with wrapper classes, create an instance of the wrapper
-                var handleType = GetHandleTypeName(cbTypeId);
-                WriteLine($"            const {cbParam.Name}Handle = wrapIfHandle({cbParam.Name}Data) as {handleType};");
-                WriteLine($"            const {cbParam.Name} = new {wrapperClassName}({cbParam.Name}Handle, this._client);");
-            }
-            else
-            {
-                // For raw handle types, just wrap and cast
-                WriteLine($"            const {cbParam.Name} = wrapIfHandle({cbParam.Name}Data) as {tsType};");
-            }
-
-            WriteLine($"            {returnPrefix}await {callbackName}({cbParam.Name});");
+            WriteLine($"{bodyIndent}{returnPrefix}await {callbackName}({cbParam.Name});");
         }
         else
         {
-            // Multi-parameter callback - .NET sends as { p0, p1, ... }
-            var paramNames = callbackParameters.Select((p, i) => $"p{i}").ToList();
-            var destructureWithTypes = string.Join(", ", paramNames.Select(p => $"{p}: unknown"));
-
-            WriteLine($"            const args = argsData as {{ {destructureWithTypes} }};");
-
             var callArgs = new List<string>();
             for (var i = 0; i < callbackParameters.Count; i++)
             {
                 var cbParam = callbackParameters[i];
-                var tsType = MapTypeRefToTypeScript(cbParam.Type);
-                var cbTypeId = cbParam.Type.TypeId;
+                var callbackArgName = $"{cbParam.Name}Data";
 
-                if (_wrapperClassNames.TryGetValue(cbTypeId, out var wrapperClassName))
-                {
-                    // For types with wrapper classes, create an instance of the wrapper
-                    var handleType = GetHandleTypeName(cbTypeId);
-                    WriteLine($"            const {cbParam.Name}Handle = wrapIfHandle(args.p{i}) as {handleType};");
-                    WriteLine($"            const {cbParam.Name} = new {wrapperClassName}({cbParam.Name}Handle, this._client);");
-                }
-                else
-                {
-                    // For raw handle types, just wrap and cast
-                    WriteLine($"            const {cbParam.Name} = wrapIfHandle(args.p{i}) as {tsType};");
-                }
+                GenerateCallbackParameterConversion(cbParam, callbackArgName, clientExpression, bodyIndent);
                 callArgs.Add(cbParam.Name);
             }
 
-            WriteLine($"            {returnPrefix}await {callbackName}({string.Join(", ", callArgs)});");
+            WriteLine($"{bodyIndent}{returnPrefix}await {callbackName}({string.Join(", ", callArgs)});");
+        }
+    }
+
+    private void GenerateCallbackParameterConversion(AtsCallbackParameterInfo callbackParameter, string callbackArgName, string clientExpression, string indent)
+    {
+        var tsType = _projector.MapTypeRefToTypeScript(callbackParameter.Type);
+        var cbTypeId = callbackParameter.Type.TypeId;
+
+        if (cbTypeId == AtsConstants.CancellationToken)
+        {
+            WriteLine($"{indent}const {callbackParameter.Name} = CancellationToken.fromValue({callbackArgName});");
+        }
+        else if (TypeScriptApiProjector.IsDictionaryType(callbackParameter.Type) && !callbackParameter.Type.IsReadOnly)
+        {
+            var keyType = _projector.MapTypeRefToTypeScript(callbackParameter.Type.KeyType);
+            var valueType = _projector.MapTypeRefToTypeScript(callbackParameter.Type.ValueType);
+            var handleType = TypeScriptApiProjector.GetHandleTypeName(cbTypeId);
+
+            WriteLine($"{indent}const {callbackParameter.Name}Handle = wrapIfHandle({callbackArgName}) as {handleType};");
+            WriteLine($"{indent}const {callbackParameter.Name} = new AspireDict<{keyType}, {valueType}>({callbackParameter.Name}Handle, {clientExpression}, '{cbTypeId}');");
+        }
+        else if (_projector.WrapperClassNames.TryGetValue(cbTypeId, out var wrapperClassName))
+        {
+            var handleType = _projector.GetConcreteHandleTypeName(cbTypeId);
+            WriteLine($"{indent}const {callbackParameter.Name}Handle = wrapIfHandle({callbackArgName}) as {handleType};");
+            WriteLine($"{indent}const {callbackParameter.Name} = new {TypeScriptApiProjector.GetImplementationClassName(wrapperClassName)}({callbackParameter.Name}Handle, {clientExpression});");
+        }
+        else
+        {
+            WriteLine($"{indent}const {callbackParameter.Name} = wrapIfHandle({callbackArgName}) as {tsType};");
         }
     }
 
     private void GenerateConnectionHelper()
     {
-        var builderHandle = GetHandleTypeName(AtsConstants.BuilderTypeId);
+        var builderHandle = TypeScriptApiProjector.GetHandleTypeName(AtsConstants.BuilderTypeId);
 
         WriteLine($$"""
             // ============================================================================
@@ -1372,7 +1945,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
                     );
                 }
 
-                const client = new AspireClientRpc(socketPath);
+                const client = new AspireClient(socketPath);
                 await client.connect();
 
                 // Exit the process if the server connection is lost
@@ -1393,13 +1966,18 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
              *
              * @example
              * const builder = await createBuilder();
-             * builder.addRedis("cache");
-             * builder.addContainer("api", "mcr.microsoft.com/dotnet/samples:aspnetapp");
+             * await builder.addRedis("cache");
+             * await builder.addContainer("api", "mcr.microsoft.com/dotnet/samples:aspnetapp");
              * const app = await builder.build();
              * await app.run();
              */
             export async function createBuilder(options?: CreateBuilderOptions): Promise<DistributedApplicationBuilder> {
                 const client = await connect();
+
+                // Apply client-side options before any tracking begins
+                if (options?.throwOnPendingRejections === false) {
+                    client.throwOnPendingRejections = false;
+                }
 
                 // Default args, projectDirectory, and appHostFilePath if not provided
                 // ASPIRE_APPHOST_FILEPATH is set by the CLI for consistent socket hash computation
@@ -1410,16 +1988,20 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
                     appHostFilePath: options?.appHostFilePath ?? process.env.ASPIRE_APPHOST_FILEPATH
                 };
 
+                // Strip client-only options before sending to the host
+                delete effectiveOptions.throwOnPendingRejections;
+
                 const handle = await client.invokeCapability<{{builderHandle}}>(
-                    'Aspire.Hosting/createBuilderWithOptions',
-                    { options: effectiveOptions }
+                    'Aspire.Hosting/createBuilder',
+                    { argsOrOptions: effectiveOptions }
                 );
-                return new DistributedApplicationBuilder(handle, client);
+                return new DistributedApplicationBuilderImpl(handle, client);
             }
 
             // Re-export commonly used types
-            export { Handle, CapabilityError, registerCallback } from './transport.js';
-            export { refExpr, ReferenceExpression } from './base.js';
+            export { Handle, AppHostUsageError, CancellationToken, CapabilityError, registerCallback } from './transport.mjs';
+            export { refExpr, ReferenceExpression } from './base.mjs';
+            export type { HandleReference, Awaitable } from './base.mjs';
             """);
         WriteLine();
     }
@@ -1438,7 +2020,9 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             process.on('unhandledRejection', (reason: unknown) => {
                 const error = reason instanceof Error ? reason : new Error(String(reason));
 
-                if (reason instanceof CapabilityError) {
+                if (reason instanceof AppHostUsageError) {
+                    console.error(`\n❌ AppHost Error: ${error.message}`);
+                } else if (reason instanceof CapabilityError) {
                     console.error(`\n❌ Capability Error: ${error.message}`);
                     console.error(`   Code: ${(reason as CapabilityError).code}`);
                     if ((reason as CapabilityError).capability) {
@@ -1455,8 +2039,20 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             });
 
             process.on('uncaughtException', (error: Error) => {
-                console.error(`\n❌ Uncaught Exception: ${error.message}`);
-                if (error.stack) {
+                if (error instanceof AppHostUsageError) {
+                    console.error(`\n❌ AppHost Error: ${error.message}`);
+                } else if (error instanceof CapabilityError) {
+                    console.error(`\n❌ Capability Error: ${error.message}`);
+                    console.error(`   Code: ${error.code}`);
+                    if (error.capability) {
+                        console.error(`   Capability: ${error.capability}`);
+                    }
+                } else {
+                    console.error(`\n❌ Uncaught Exception: ${error.message}`);
+                }
+                // Suppress stack traces for structured errors (AppHostUsageError, CapabilityError)
+                // to keep polyglot output clean. Use --verbose for full diagnostics.
+                if (!(error instanceof AppHostUsageError) && !(error instanceof CapabilityError) && error.stack) {
                     console.error(error.stack);
                 }
                 process.exit(1);
@@ -1480,17 +2076,29 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         // Register type classes (context types like EnvironmentCallbackContext)
         foreach (var typeClass in typeClasses)
         {
-            var className = _wrapperClassNames.GetValueOrDefault(typeClass.TypeId) ?? DeriveClassName(typeClass.TypeId);
-            var handleType = GetHandleTypeName(typeClass.TypeId);
-            WriteLine($"registerHandleWrapper('{typeClass.TypeId}', (handle, client) => new {className}(handle as {handleType}, client));");
+            var className = _projector.WrapperClassNames.GetValueOrDefault(typeClass.TypeId) ?? TypeScriptApiProjector.DeriveClassName(typeClass.TypeId);
+            var handleType = _projector.GetConcreteHandleTypeName(typeClass.TypeId);
+            WriteLine($"registerHandleWrapper('{typeClass.TypeId}', (handle, client) => new {TypeScriptApiProjector.GetImplementationClassName(className)}(handle as {handleType}, client));");
         }
 
         // Register resource builder classes
         foreach (var builder in resourceBuilders)
         {
-            var className = _wrapperClassNames.GetValueOrDefault(builder.TypeId) ?? DeriveClassName(builder.TypeId);
-            var handleType = GetHandleTypeName(builder.TypeId);
-            WriteLine($"registerHandleWrapper('{builder.TypeId}', (handle, client) => new {className}(handle as {handleType}, client));");
+            var className = _projector.WrapperClassNames.GetValueOrDefault(builder.TypeId) ?? TypeScriptApiProjector.DeriveClassName(builder.TypeId);
+            var handleType = _projector.GetConcreteHandleTypeName(builder.TypeId);
+            WriteLine($"registerHandleWrapper('{builder.TypeId}', (handle, client) => new {TypeScriptApiProjector.GetImplementationClassName(className)}(handle as {handleType}, client));");
+        }
+
+        // Returned aliases keep their marshalled TypeId, so register each one against the retained
+        // implementation. wrapIfHandle uses these registrations for handles nested in callback data.
+        foreach (var aliasTypeId in _projector.ConcreteTypeIds
+            .Where(mapping => !string.Equals(mapping.Key, mapping.Value, StringComparison.Ordinal))
+            .Select(mapping => mapping.Key)
+            .OrderBy(typeId => typeId, StringComparer.Ordinal))
+        {
+            var className = _projector.WrapperClassNames[aliasTypeId];
+            var handleType = _projector.GetConcreteHandleTypeName(aliasTypeId);
+            WriteLine($"registerHandleWrapper('{aliasTypeId}', (handle, client) => new {TypeScriptApiProjector.GetImplementationClassName(className)}(handle as {handleType}, client));");
         }
 
         WriteLine();
@@ -1498,17 +2106,19 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
 
     /// <summary>
     /// Generates a type class (context type or wrapper type).
-    /// Uses property-like object pattern for exposed properties.
-    /// For types with methods, also generates a Promise wrapper class for fluent chaining.
+    /// Uses property-like objects for mutable properties and methods for getter-only properties.
+    /// For types with generated async members, also generates a Promise wrapper class for fluent chaining.
     /// </summary>
     private void GenerateTypeClass(BuilderModel model)
     {
-        var handleType = GetHandleTypeName(model.TypeId);
-        var className = DeriveClassName(model.TypeId);
-        var hasMethods = HasChainableMethods(model);
+        var handleType = TypeScriptApiProjector.GetHandleTypeName(model.TypeId);
+        var className = TypeScriptApiProjector.DeriveClassName(model.TypeId);
+        var implementationClassName = TypeScriptApiProjector.GetImplementationClassName(className);
+
+        GenerateTypeClassInterface(model);
 
         WriteLine("// ============================================================================");
-        WriteLine($"// {className}");
+        WriteLine($"// {implementationClassName}");
         WriteLine("// ============================================================================");
         WriteLine();
 
@@ -1517,24 +2127,24 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         var setters = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
         var contextMethods = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.InstanceMethod).ToList();
         var otherMethods = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.Method).ToList();
-
-        // Combine methods for thenable generation
         var allMethods = contextMethods.Concat(otherMethods).ToList();
+        var hasMethods = allMethods.Count > 0;
 
-        WriteLine($"/**");
-        WriteLine($" * Type class for {className}.");
-        WriteLine($" */");
-        WriteLine($"export class {className} {{");
+        WriteDocumentationComment(string.Empty, GetHandleDocumentation(model.TypeId), $"Type class for {className}.");
+        WriteLine($"class {implementationClassName} implements {className} {{");
         WriteLine($"    constructor(private _handle: {handleType}, private _client: AspireClientRpc) {{}}");
         WriteLine();
         WriteLine($"    /** Serialize for JSON-RPC transport */");
         WriteLine($"    toJSON(): MarshalledHandle {{ return this._handle.toJSON(); }}");
         WriteLine();
 
-        // Group getters and setters by property name to create property-like objects
-        var properties = GroupPropertiesByName(getters, setters);
+        // Group getters and setters by property name to create property members
+        var properties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters);
+        var getterOnlyProperties = properties
+            .Where(p => TypeScriptApiProjector.IsGetterOnlyProperty(p.Getter, p.Setter))
+            .ToList();
 
-        // Generate property-like objects
+        // Generate property access members
         foreach (var prop in properties)
         {
             GeneratePropertyLikeObject(prop.PropertyName, prop.Getter, prop.Setter);
@@ -1564,124 +2174,96 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         WriteLine("}");
         WriteLine();
 
-        // Generate thenable wrapper class if this type has methods
-        if (hasMethods)
+        // Generate thenable wrapper class if this type has generated async members
+        if (hasMethods || getterOnlyProperties.Count > 0)
         {
             GenerateTypeClassThenableWrapper(model, allMethods);
         }
     }
 
     /// <summary>
-    /// Groups getters and setters by property name.
+    /// Generates a property access member.
     /// </summary>
-    private static List<(string PropertyName, AtsCapabilityInfo? Getter, AtsCapabilityInfo? Setter)> GroupPropertiesByName(
-        List<AtsCapabilityInfo> getters, List<AtsCapabilityInfo> setters)
-    {
-        var result = new List<(string PropertyName, AtsCapabilityInfo? Getter, AtsCapabilityInfo? Setter)>();
-        var processedNames = new HashSet<string>();
-
-        // Process getters
-        foreach (var getter in getters)
-        {
-            var propName = ExtractPropertyName(getter.MethodName);
-            if (processedNames.Contains(propName))
-            {
-                continue;
-            }
-            processedNames.Add(propName);
-
-            // Find matching setter (setPropertyName for propertyName)
-            var setterName = "set" + char.ToUpperInvariant(propName[0]) + propName[1..];
-            var setter = setters.FirstOrDefault(s => ExtractPropertyName(s.MethodName).Equals(setterName, StringComparison.OrdinalIgnoreCase));
-
-            result.Add((propName, getter, setter));
-        }
-
-        // Process any setters without matching getters
-        foreach (var setter in setters)
-        {
-            var setterMethodName = ExtractPropertyName(setter.MethodName);
-            // setPropertyName -> propertyName
-            if (setterMethodName.StartsWith("set", StringComparison.OrdinalIgnoreCase) && setterMethodName.Length > 3)
-            {
-                var propName = char.ToLowerInvariant(setterMethodName[3]) + setterMethodName[4..];
-                if (!processedNames.Contains(propName))
-                {
-                    processedNames.Add(propName);
-                    result.Add((propName, null, setter));
-                }
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Extracts the property name from a method name like "ClassName.propertyName" or "setPropertyName".
-    /// </summary>
-    private static string ExtractPropertyName(string methodName)
-    {
-        // Handle "ClassName.propertyName" format
-        if (methodName.Contains('.'))
-        {
-            return methodName[(methodName.LastIndexOf('.') + 1)..];
-        }
-        return methodName;
-    }
-
-    /// <summary>
-    /// Generates a property-like object with get and/or set methods.
-    /// For dictionary types, generates a direct AspireDict field instead.
-    /// </summary>
+    /// <remarks>
+    /// <para>Getter-only properties are emitted as zero-argument async methods.
+    /// Mutable properties produce an object with async <c>get</c>/<c>set</c> functions.
+    /// Dictionary and list properties delegate to <c>AspireDict</c>/<c>AspireList</c> helpers.
+    /// Wrapper-typed mutable properties delegate to <see cref="GenerateWrapperPropertyObject"/>.</para>
+    /// <para>Generated TypeScript (example for a string property <c>connectionString</c>):</para>
+    /// <code>
+    /// connectionString = {
+    ///     get: async (): Promise&lt;string&gt; =&gt; {
+    ///         return await this._client.invokeCapability&lt;string&gt;(
+    ///             'aspire.resource.connectionString.get', { context: this._handle });
+    ///     },
+    ///     set: async (value: string | PromiseLike&lt;string&gt;): Promise&lt;void&gt; =&gt; {
+    ///         value = isPromiseLike(value) ? await value : value;
+    ///         await this._client.invokeCapability&lt;void&gt;(
+    ///             'aspire.resource.connectionString.set', { context: this._handle, value });
+    ///     }
+    /// };
+    /// </code>
+    /// </remarks>
     private void GeneratePropertyLikeObject(string propertyName, AtsCapabilityInfo? getter, AtsCapabilityInfo? setter)
     {
+        if (TypeScriptApiProjector.IsGetterOnlyProperty(getter, setter))
+        {
+            GenerateGetterOnlyPropertyMethod(propertyName, getter!);
+            return;
+        }
+
         // Determine the return type from getter
         string returnType = "unknown";
-        string? description = null;
 
         if (getter != null)
         {
-            returnType = MapTypeRefToTypeScript(getter.ReturnType);
-            description = getter.Description;
+            returnType = _projector.MapTypeRefToTypeScript(getter.ReturnType);
 
-            // Check if this is a dictionary type - generate direct AspireDict field instead
-            if (IsDictionaryType(getter.ReturnType))
+            // Mutable dictionary/list properties stay as property accessors so callers can use
+            // wrapper operations (for example, property.get()/set() or list/dict helpers)
+            // without switching to the getter-only method shape.
+            if (TypeScriptApiProjector.IsDictionaryType(getter.ReturnType))
             {
-                GenerateDictionaryProperty(propertyName, getter);
+                GenerateMutableDictionaryProperty(propertyName, getter);
                 return;
             }
 
-            // Check if this is a list type - generate direct AspireList field instead
-            if (IsListType(getter.ReturnType))
+            if (TypeScriptApiProjector.IsListType(getter.ReturnType))
             {
-                GenerateListProperty(propertyName, getter);
+                GenerateMutableListProperty(propertyName, getter);
                 return;
             }
 
             // Check if return type is a wrapper class - use property-like object returning wrapper
-            if (getter.ReturnType?.TypeId != null && _wrapperClassNames.TryGetValue(getter.ReturnType.TypeId, out var wrapperClassName))
+            if (getter.ReturnType?.TypeId != null && _projector.WrapperClassNames.TryGetValue(getter.ReturnType.TypeId, out var wrapperClassName))
             {
-                GenerateWrapperPropertyObject(propertyName, getter, wrapperClassName);
+                GenerateWrapperPropertyObject(propertyName, getter, setter, wrapperClassName);
                 return;
             }
         }
 
         // Generate property-like object for scalar types
-        if (!string.IsNullOrEmpty(description))
-        {
-            WriteLine($"    /** {description} */");
-        }
-
         WriteLine($"    {propertyName} = {{");
 
         // Generate get method
         if (getter != null)
         {
             WriteLine($"        get: async (): Promise<{returnType}> => {{");
-            WriteLine($"            return await this._client.invokeCapability<{returnType}>(");
-            WriteLine($"                '{getter.CapabilityId}',");
-            WriteLine($"                {{ context: this._handle }}");
-            WriteLine("            );");
+            if (getter.ReturnType?.TypeId == AtsConstants.CancellationToken)
+            {
+                WriteLine("            const result = await this._client.invokeCapability<string | null>(");
+                WriteLine($"                '{getter.CapabilityId}',");
+                WriteLine("                { context: this._handle }");
+                WriteLine("            );");
+                WriteLine("            return CancellationToken.fromValue(result);");
+            }
+            else
+            {
+                WriteLine($"            return await this._client.invokeCapability<{returnType}>(");
+                WriteLine($"                '{getter.CapabilityId}',");
+                WriteLine($"                {{ context: this._handle }}");
+                WriteLine("            );");
+            }
             WriteLine("        },");
         }
 
@@ -1691,11 +2273,176 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             var valueParam = setter.Parameters.FirstOrDefault(p => p.Name == "value");
             if (valueParam != null)
             {
-                var valueType = MapTypeRefToTypeScript(valueParam.Type);
+                var valueType = _projector.MapInputTypeToTypeScript(valueParam.Type);
                 WriteLine($"        set: async (value: {valueType}): Promise<void> => {{");
+                GeneratePromiseResolutionForParam("value", valueParam.Type, "            ");
                 WriteLine($"            await this._client.invokeCapability<void>(");
                 WriteLine($"                '{setter.CapabilityId}',");
-                WriteLine($"                {{ context: this._handle, value }}");
+                WriteLine($"                {{ context: this._handle, {GetRpcArgumentEntry("value", valueParam.Type)} }}");
+                WriteLine("            );");
+                WriteLine("        }");
+            }
+        }
+
+        WriteLine("    };");
+        WriteLine();
+    }
+
+    private void GenerateGetterOnlyPropertyMethod(string propertyName, AtsCapabilityInfo getter)
+    {
+        if (TypeScriptApiProjector.IsDictionaryType(getter.ReturnType))
+        {
+            GenerateDictionaryProperty(propertyName, getter);
+            return;
+        }
+
+        if (TypeScriptApiProjector.IsListType(getter.ReturnType))
+        {
+            GenerateListProperty(propertyName, getter);
+            return;
+        }
+
+        if (getter.ReturnType?.TypeId != null && _projector.WrapperClassNames.TryGetValue(getter.ReturnType.TypeId, out var wrapperClassName))
+        {
+            GenerateWrapperGetterOnlyPropertyMethod(propertyName, getter, wrapperClassName);
+            return;
+        }
+
+        // Promise-wrapper types that are NOT registered as generated wrapper classes (currently only
+        // InteractionInputCollection, a hand-written base.mts type) wrap the marshalled collection
+        // promise in their hand-written ...Promise thenable so by-name accessors chain without an
+        // intermediate await. Awaiting the wrapper still resolves to the plain collection, preserving
+        // the existing `await (await x.inputs()).value(...)` form.
+        if (_projector.TryGetPromiseWrapperType(getter.ReturnType, out var promiseInterfaceName, out var promiseImplementationClassName))
+        {
+            var collectionType = _projector.GetGetterOnlyPropertyReturnType(getter.ReturnType);
+            WriteLine($"    {propertyName}(): {promiseInterfaceName} {{");
+            WriteLine($"        return new {promiseImplementationClassName}(this._client.invokeCapability<{collectionType}>(");
+            WriteLine($"            '{getter.CapabilityId}',");
+            WriteLine("            { context: this._handle }");
+            WriteLine("        ), this._client, false);");
+            WriteLine("    }");
+            WriteLine();
+            return;
+        }
+
+        var returnType = _projector.GetGetterOnlyPropertyReturnType(getter.ReturnType);
+
+        WriteLine($"    async {propertyName}(): Promise<{returnType}> {{");
+        if (getter.ReturnType?.TypeId == AtsConstants.CancellationToken)
+        {
+            WriteLine("        const result = await this._client.invokeCapability<string | null>(");
+            WriteLine($"            '{getter.CapabilityId}',");
+            WriteLine("            { context: this._handle }");
+            WriteLine("        );");
+            WriteLine("        return CancellationToken.fromValue(result);");
+        }
+        else
+        {
+            WriteLine($"        return await this._client.invokeCapability<{returnType}>(");
+            WriteLine($"            '{getter.CapabilityId}',");
+            WriteLine("            { context: this._handle }");
+            WriteLine("        );");
+        }
+        WriteLine("    }");
+        WriteLine();
+    }
+
+    private void GenerateWrapperGetterOnlyPropertyMethod(string propertyName, AtsCapabilityInfo getter, string wrapperClassName)
+    {
+        var handleType = _projector.GetConcreteHandleTypeName(getter.ReturnType!.TypeId);
+        var wrapperImplementationClassName = TypeScriptApiProjector.GetImplementationClassName(wrapperClassName);
+
+        if (_projector.TryGetPromiseWrapperType(getter.ReturnType, out var promiseInterfaceName, out var promiseImplementationClassName))
+        {
+            WriteLine($"    {propertyName}(): {promiseInterfaceName} {{");
+            WriteLine("        const promise = (async () => {");
+            WriteLine($"            const handle = await this._client.invokeCapability<{handleType}>(");
+            WriteLine($"                '{getter.CapabilityId}',");
+            WriteLine("                { context: this._handle }");
+            WriteLine("            );");
+            WriteLine($"            return new {wrapperImplementationClassName}(handle, this._client);");
+            WriteLine("        })();");
+            WriteLine($"        return new {promiseImplementationClassName}(promise, this._client, false);");
+            WriteLine("    }");
+            WriteLine();
+            return;
+        }
+
+        WriteLine($"    async {propertyName}(): Promise<{wrapperClassName}> {{");
+        WriteLine($"        const handle = await this._client.invokeCapability<{handleType}>(");
+        WriteLine($"            '{getter.CapabilityId}',");
+        WriteLine("            { context: this._handle }");
+        WriteLine("        );");
+        WriteLine($"        return new {wrapperImplementationClassName}(handle, this._client);");
+        WriteLine("    }");
+        WriteLine();
+    }
+
+    /// <summary>
+    /// Generates a property-like object that returns a wrapper class.
+    /// </summary>
+    /// <remarks>
+    /// Similar to <see cref="GeneratePropertyLikeObject"/> but the getter returns a wrapper
+    /// class instance instead of a scalar value. The RPC result is a handle that gets
+    /// wrapped in the implementation class.
+    /// <code>
+    /// // Example: a property 'primaryEndpoint' returning EndpointReference
+    /// primaryEndpoint = {
+    ///     get: async (): Promise&lt;EndpointReference&gt; =&gt; {
+    ///         const handle = await this._client.invokeCapability&lt;EndpointReferenceHandle&gt;(
+    ///             'aspire.resource.primaryEndpoint.get', { context: this._handle });
+    ///         return new EndpointReferenceImpl(handle, this._client);
+    ///     },
+    ///     set: async (value: EndpointReference | PromiseLike&lt;EndpointReference&gt;): Promise&lt;void&gt; =&gt; {
+    ///         value = isPromiseLike(value) ? await value : value;
+    ///         await this._client.invokeCapability&lt;void&gt;(
+    ///             'aspire.resource.primaryEndpoint.set', { context: this._handle, value });
+    ///     }
+    /// };
+    /// </code>
+    /// </remarks>
+    private void GenerateWrapperPropertyObject(string propertyName, AtsCapabilityInfo getter, AtsCapabilityInfo? setter, string wrapperClassName)
+    {
+        var handleType = _projector.GetConcreteHandleTypeName(getter.ReturnType!.TypeId);
+        var wrapperImplementationClassName = TypeScriptApiProjector.GetImplementationClassName(wrapperClassName);
+
+        WriteLine($"    {propertyName} = {{");
+        if (_projector.TryGetPromiseWrapperType(getter.ReturnType, out var promiseInterfaceName, out var promiseImplementationClassName))
+        {
+            WriteLine($"        get: (): {promiseInterfaceName} => {{");
+            WriteLine("            const promise = (async () => {");
+            WriteLine($"                const handle = await this._client.invokeCapability<{handleType}>(");
+            WriteLine($"                    '{getter.CapabilityId}',");
+            WriteLine($"                    {{ context: this._handle }}");
+            WriteLine("                );");
+            WriteLine($"                return new {wrapperImplementationClassName}(handle, this._client);");
+            WriteLine("            })();");
+            WriteLine($"            return new {promiseImplementationClassName}(promise, this._client, false);");
+            WriteLine("        },");
+        }
+        else
+        {
+            WriteLine($"        get: async (): Promise<{wrapperClassName}> => {{");
+            WriteLine($"            const handle = await this._client.invokeCapability<{handleType}>(");
+            WriteLine($"                '{getter.CapabilityId}',");
+            WriteLine($"                {{ context: this._handle }}");
+            WriteLine("            );");
+            WriteLine($"            return new {wrapperImplementationClassName}(handle, this._client);");
+            WriteLine("        },");
+        }
+
+        if (setter != null)
+        {
+            var valueParam = setter.Parameters.FirstOrDefault(p => p.Name == "value");
+            if (valueParam != null)
+            {
+                var valueType = _projector.MapInputTypeToTypeScript(valueParam.Type);
+                WriteLine($"        set: async (value: {valueType}): Promise<void> => {{");
+                GeneratePromiseResolutionForParam("value", valueParam.Type, "            ");
+                WriteLine($"            await this._client.invokeCapability<void>(");
+                WriteLine($"                '{setter.CapabilityId}',");
+                WriteLine($"                {{ context: this._handle, {GetRpcArgumentEntry("value", valueParam.Type)} }}");
                 WriteLine("            );");
                 WriteLine("        }");
             }
@@ -1706,47 +2453,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// Generates a property-like object that returns a wrapper class.
-    /// </summary>
-    private void GenerateWrapperPropertyObject(string propertyName, AtsCapabilityInfo getter, string wrapperClassName)
-    {
-        var handleType = GetHandleTypeName(getter.ReturnType!.TypeId);
-
-        if (!string.IsNullOrEmpty(getter.Description))
-        {
-            WriteLine($"    /** {getter.Description} */");
-        }
-
-        WriteLine($"    {propertyName} = {{");
-        WriteLine($"        get: async (): Promise<{wrapperClassName}> => {{");
-        WriteLine($"            const handle = await this._client.invokeCapability<{handleType}>(");
-        WriteLine($"                '{getter.CapabilityId}',");
-        WriteLine($"                {{ context: this._handle }}");
-        WriteLine("            );");
-        WriteLine($"            return new {wrapperClassName}(handle, this._client);");
-        WriteLine("        },");
-        WriteLine("    };");
-        WriteLine();
-    }
-
-    /// <summary>
-    /// Checks if a type reference is a dictionary type.
-    /// </summary>
-    private static bool IsDictionaryType(AtsTypeRef? typeRef)
-    {
-        return typeRef?.Category == AtsTypeCategory.Dict;
-    }
-
-    /// <summary>
-    /// Checks if a type reference is a list type.
-    /// </summary>
-    private static bool IsListType(AtsTypeRef? typeRef)
-    {
-        return typeRef?.Category == AtsTypeCategory.List;
-    }
-
-    /// <summary>
-    /// Generates a direct AspireDict property for dictionary types.
+    /// Generates a getter-only method for dictionary types.
     /// </summary>
     private void GenerateDictionaryProperty(string propertyName, AtsCapabilityInfo getter)
     {
@@ -1757,24 +2464,51 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         // Try to extract key and value types from Dict type
         if (getter.ReturnType?.KeyType != null)
         {
-            keyType = MapTypeRefToTypeScript(getter.ReturnType.KeyType);
+            keyType = _projector.MapTypeRefToTypeScript(getter.ReturnType.KeyType);
         }
         if (getter.ReturnType?.ValueType != null)
         {
             // Union types will be mapped correctly via MapTypeRefToTypeScript
-            valueType = MapTypeRefToTypeScript(getter.ReturnType.ValueType);
+            valueType = _projector.MapTypeRefToTypeScript(getter.ReturnType.ValueType);
         }
 
-        var typeId = $"'{getter.CapabilityId.Replace(".get", "")}'";
+        var typeId = $"'{getter.CapabilityId}'";
         var getterCapabilityId = $"'{getter.CapabilityId}'";
 
-        if (!string.IsNullOrEmpty(getter.Description))
+        // Pass the getter capability ID so AspireDict can lazily fetch the actual dictionary handle.
+        WriteLine($"    private _{propertyName}?: AspireDict<{keyType}, {valueType}>;");
+        WriteLine($"    async {propertyName}(): Promise<AspireDict<{keyType}, {valueType}>> {{");
+        WriteLine($"        if (!this._{propertyName}) {{");
+        WriteLine($"            this._{propertyName} = new AspireDict<{keyType}, {valueType}>(");
+        WriteLine($"                this._handle,");
+        WriteLine($"                this._client,");
+        WriteLine($"                {typeId},");
+        WriteLine($"                {getterCapabilityId}");
+        WriteLine("            );");
+        WriteLine("        }");
+        WriteLine($"        return this._{propertyName};");
+        WriteLine("    }");
+        WriteLine();
+    }
+
+    private void GenerateMutableDictionaryProperty(string propertyName, AtsCapabilityInfo getter)
+    {
+        var keyType = "string";
+        var valueType = "unknown";
+
+        if (getter.ReturnType?.KeyType != null)
         {
-            WriteLine($"    /** {getter.Description} */");
+            keyType = _projector.MapTypeRefToTypeScript(getter.ReturnType.KeyType);
         }
 
-        // Generate a getter property that returns AspireDict
-        // Pass the getter capability ID so AspireDict can lazily fetch the actual dictionary handle
+        if (getter.ReturnType?.ValueType != null)
+        {
+            valueType = _projector.MapTypeRefToTypeScript(getter.ReturnType.ValueType);
+        }
+
+        var typeId = $"'{getter.CapabilityId}'";
+        var getterCapabilityId = $"'{getter.CapabilityId}'";
+
         WriteLine($"    private _{propertyName}?: AspireDict<{keyType}, {valueType}>;");
         WriteLine($"    get {propertyName}(): AspireDict<{keyType}, {valueType}> {{");
         WriteLine($"        if (!this._{propertyName}) {{");
@@ -1791,7 +2525,7 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     }
 
     /// <summary>
-    /// Generates a direct AspireList property for list types.
+    /// Generates a getter-only method for list types.
     /// </summary>
     private void GenerateListProperty(string propertyName, AtsCapabilityInfo getter)
     {
@@ -1800,19 +2534,40 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
 
         if (getter.ReturnType?.ElementType != null)
         {
-            elementType = MapTypeRefToTypeScript(getter.ReturnType.ElementType);
+            elementType = _projector.MapTypeRefToTypeScript(getter.ReturnType.ElementType);
         }
 
-        var typeId = $"'{getter.CapabilityId.Replace(".get", "")}'";
+        var typeId = $"'{getter.CapabilityId}'";
         var getterCapabilityId = $"'{getter.CapabilityId}'";
 
-        if (!string.IsNullOrEmpty(getter.Description))
+        // Pass the getter capability ID so AspireList can lazily fetch the actual list handle.
+        WriteLine($"    private _{propertyName}?: AspireList<{elementType}>;");
+        WriteLine($"    async {propertyName}(): Promise<AspireList<{elementType}>> {{");
+        WriteLine($"        if (!this._{propertyName}) {{");
+        WriteLine($"            this._{propertyName} = new AspireList<{elementType}>(");
+        WriteLine($"                this._handle,");
+        WriteLine($"                this._client,");
+        WriteLine($"                {typeId},");
+        WriteLine($"                {getterCapabilityId}");
+        WriteLine("            );");
+        WriteLine("        }");
+        WriteLine($"        return this._{propertyName};");
+        WriteLine("    }");
+        WriteLine();
+    }
+
+    private void GenerateMutableListProperty(string propertyName, AtsCapabilityInfo getter)
+    {
+        var elementType = "unknown";
+
+        if (getter.ReturnType?.ElementType != null)
         {
-            WriteLine($"    /** {getter.Description} */");
+            elementType = _projector.MapTypeRefToTypeScript(getter.ReturnType.ElementType);
         }
 
-        // Generate a getter property that returns AspireList
-        // Pass the getter capability ID so AspireList can lazily fetch the actual list handle
+        var typeId = $"'{getter.CapabilityId}'";
+        var getterCapabilityId = $"'{getter.CapabilityId}'";
+
         WriteLine($"    private _{propertyName}?: AspireList<{elementType}>;");
         WriteLine($"    get {propertyName}(): AspireList<{elementType}> {{");
         WriteLine($"        if (!this._{propertyName}) {{");
@@ -1831,6 +2586,19 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// <summary>
     /// Generates a context instance method (from ExposeMethods=true).
     /// </summary>
+    /// <remarks>
+    /// <para>Context methods are async methods on wrapper classes that pass <c>this._handle</c>
+    /// as the context argument. They use <see cref="GenerateResolveAndBuildArgs"/> for parameter
+    /// handling.</para>
+    /// <para>Generated TypeScript (example for <c>getEndpoint</c> on <c>PostgresResource</c>):</para>
+    /// <code>
+    /// async getEndpoint(name: string): Promise&lt;EndpointReference&gt; {
+    ///     const rpcArgs: Record&lt;string, unknown&gt; = { context: this._handle, name };
+    ///     return await this._client.invokeCapability&lt;EndpointReference&gt;(
+    ///         'aspire.resource.getEndpoint', rpcArgs);
+    /// }
+    /// </code>
+    /// </remarks>
     private void GenerateContextMethod(AtsCapabilityInfo method)
     {
         // Use OwningTypeName if available to extract method name, otherwise parse from MethodName
@@ -1843,60 +2611,83 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         var userParams = method.Parameters.Where(p => p.Name != targetParamName).ToList();
 
         // Separate required and optional parameters
-        var (requiredParams, optionalParams) = SeparateParameters(userParams);
+        var (requiredParams, optionalParams) = TypeScriptApiProjector.SeparateParameters(userParams);
         var hasOptionals = optionalParams.Count > 0;
-        var optionsInterfaceName = GetOptionsInterfaceName(methodName);
+        var hasDirectOptionsParameter = TypeScriptApiProjector.TryGetDirectOptionsParameter(optionalParams, out var directOptionsParam);
+        var optionsInterfaceName = hasDirectOptionsParameter ? _projector.MapParameterToTypeScript(directOptionsParam!) : _projector.ResolveOptionsInterfaceName(method);
+        var publicOptionsParamName = TypeScriptApiProjector.GetImplementationOptionsParameterName(userParams, hasOptionals, hasDirectOptionsParameter);
 
         // Build parameter list using options pattern
-        var paramDefs = new List<string>();
-        foreach (var param in requiredParams)
-        {
-            var tsType = MapParameterToTypeScript(param);
-            paramDefs.Add($"{param.Name}: {tsType}");
-        }
-        if (hasOptionals)
-        {
-            paramDefs.Add($"options?: {optionsInterfaceName}");
-        }
-        var paramsString = string.Join(", ", paramDefs);
+        var paramsString = _projector.BuildPublicParameterList(requiredParams, hasOptionals, optionsInterfaceName, publicOptionsParamName, TypeScriptApiProjector.GetTrailingCancellationTokenParameter(optionalParams));
 
         // Determine return type
         var returnType = GetReturnTypeId(method) != null
-            ? MapTypeRefToTypeScript(method.ReturnType)
+            ? _projector.MapTypeRefToTypeScript(method.ReturnType)
             : "void";
 
-        // Generate JSDoc
-        if (!string.IsNullOrEmpty(method.Description))
+        if (_projector.TryGetPromiseWrapperType(method.ReturnType, out var returnPromiseInterfaceName, out var returnPromiseImplementationClassName))
         {
-            WriteLine($"    /** {method.Description} */");
+            var returnTypeId = method.ReturnType!.TypeId;
+            var returnClassName = _projector.GetConcreteClassName(returnTypeId);
+            var returnImplementationClassName = TypeScriptApiProjector.GetImplementationClassName(returnClassName);
+            var returnHandleType = _projector.GetConcreteHandleTypeName(returnTypeId);
+
+            WriteCapabilityDocComment("    ", method, requiredParams, hasOptionals ? publicOptionsParamName : null);
+            Write($"    {methodName}(");
+            Write(paramsString);
+            WriteLine($"): {returnPromiseInterfaceName} {{");
+            WriteLine("        const promise = (async () => {");
+
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
+            {
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"            {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
+            }
+
+            GenerateResolveAndBuildArgs(targetParamName, userParams, requiredParams, optionalParams, useSafeOptionalLocalNames: true, indent: "            ");
+
+            WriteLine($"            const handle = await this._client.invokeCapability<{returnHandleType}>(");
+            WriteLine($"                '{method.CapabilityId}',");
+            WriteLine("                rpcArgs");
+            WriteLine("            );");
+            WriteLine($"            return new {returnImplementationClassName}(handle, this._client);");
+            WriteLine("        })();");
+            WriteLine($"        return new {returnPromiseImplementationClassName}(promise, this._client);");
+            WriteLine("    }");
+            WriteLine();
+            return;
         }
 
         // Generate async method
+        WriteCapabilityDocComment("    ", method, requiredParams, hasOptionals ? publicOptionsParamName : null);
         Write($"    async {methodName}(");
         Write(paramsString);
         WriteLine($"): Promise<{returnType}> {{");
 
         // Extract optional params from options object
-        foreach (var param in optionalParams)
+        foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
         {
-            WriteLine($"        const {param.Name} = options?.{param.Name};");
+            var localParameterName = GetLocalParameterName(param);
+            WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
         }
 
-        // Build args object with conditional inclusion
-        var requiredArgs = new List<string> { $"{targetParamName}: this._handle" };
-        foreach (var param in requiredParams)
-        {
-            requiredArgs.Add(param.Name);
-        }
-        WriteLine($"        const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
-        foreach (var param in optionalParams)
-        {
-            WriteLine($"        if ({param.Name} !== undefined) rpcArgs.{param.Name} = {param.Name};");
-        }
+        // Resolve promise-like params and build args
+        GenerateResolveAndBuildArgs(targetParamName, userParams, requiredParams, optionalParams, useSafeOptionalLocalNames: true);
 
         if (returnType == "void")
         {
             WriteLine($"        await this._client.invokeCapability<void>(");
+        }
+        else if (method.ReturnType?.TypeId == AtsConstants.CancellationToken)
+        {
+            WriteLine("        const result = await this._client.invokeCapability<string | null>(");
+            WriteLine($"            '{method.CapabilityId}',");
+            WriteLine("            rpcArgs");
+            WriteLine("        );");
+            WriteLine("        return CancellationToken.fromValue(result);");
+            WriteLine("    }");
+            WriteLine();
+            return;
         }
         else
         {
@@ -1912,9 +2703,21 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// <summary>
     /// Generates a method on a wrapper class.
     /// </summary>
+    /// <remarks>
+    /// <para>Similar to <see cref="GenerateContextMethod"/> but designed for wrapper classes
+    /// that expose RPC methods without the thenable/fluent pattern.</para>
+    /// <para>Generated TypeScript (example for <c>getExpression</c> on <c>EndpointReference</c>):</para>
+    /// <code>
+    /// async getExpression(name: string): Promise&lt;string&gt; {
+    ///     const rpcArgs: Record&lt;string, unknown&gt; = { builder: this._handle, name };
+    ///     return await this._client.invokeCapability&lt;string&gt;(
+    ///         'aspire.endpoint.getExpression', rpcArgs);
+    /// }
+    /// </code>
+    /// </remarks>
     private void GenerateWrapperMethod(AtsCapabilityInfo capability)
     {
-        var methodName = GetTypeScriptMethodName(capability.MethodName);
+        var methodName = TypeScriptApiProjector.GetTypeScriptMethodName(capability.MethodName);
 
         // First arg is the handle (implicit via this._handle) - use metadata instead of string parsing
         var firstParamName = capability.TargetParameterName ?? "builder";
@@ -1923,54 +2726,66 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         var userParams = capability.Parameters.Where(p => p.Name != firstParamName).ToList();
 
         // Separate required and optional parameters
-        var (requiredParams, optionalParams) = SeparateParameters(userParams);
+        var (requiredParams, optionalParams) = TypeScriptApiProjector.SeparateParameters(userParams);
         var hasOptionals = optionalParams.Count > 0;
-        var optionsInterfaceName = GetOptionsInterfaceName(methodName);
+        var hasDirectOptionsParameter = TypeScriptApiProjector.TryGetDirectOptionsParameter(optionalParams, out var directOptionsParam);
+        var optionsInterfaceName = hasDirectOptionsParameter ? _projector.MapParameterToTypeScript(directOptionsParam!) : _projector.ResolveOptionsInterfaceName(capability);
+        var publicOptionsParamName = TypeScriptApiProjector.GetImplementationOptionsParameterName(userParams, hasOptionals, hasDirectOptionsParameter);
 
         // Build parameter list using options pattern
-        var paramDefs = new List<string>();
-        foreach (var param in requiredParams)
-        {
-            var tsType = MapParameterToTypeScript(param);
-            paramDefs.Add($"{param.Name}: {tsType}");
-        }
-        if (hasOptionals)
-        {
-            paramDefs.Add($"options?: {optionsInterfaceName}");
-        }
-        var paramsString = string.Join(", ", paramDefs);
+        var paramsString = _projector.BuildPublicParameterList(requiredParams, hasOptionals, optionsInterfaceName, publicOptionsParamName, TypeScriptApiProjector.GetTrailingCancellationTokenParameter(optionalParams));
 
         // Determine return type
-        var returnType = MapTypeRefToTypeScript(capability.ReturnType);
+        var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
 
-        // Generate JSDoc
-        if (!string.IsNullOrEmpty(capability.Description))
+        if (_projector.TryGetPromiseWrapperType(capability.ReturnType, out var returnPromiseInterfaceName, out var returnPromiseImplementationClassName))
         {
-            WriteLine($"    /** {capability.Description} */");
+            var returnTypeId = capability.ReturnType!.TypeId;
+            var returnClassName = _projector.GetConcreteClassName(returnTypeId);
+            var returnImplementationClassName = TypeScriptApiProjector.GetImplementationClassName(returnClassName);
+            var returnHandleType = _projector.GetConcreteHandleTypeName(returnTypeId);
+
+            WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
+            Write($"    {methodName}(");
+            Write(paramsString);
+            WriteLine($"): {returnPromiseInterfaceName} {{");
+            WriteLine("        const promise = (async () => {");
+
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
+            {
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"            {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
+            }
+
+            GenerateResolveAndBuildArgs(firstParamName, userParams, requiredParams, optionalParams, useSafeOptionalLocalNames: true, indent: "            ");
+
+            WriteLine($"            const handle = await this._client.invokeCapability<{returnHandleType}>(");
+            WriteLine($"                '{capability.CapabilityId}',");
+            WriteLine("                rpcArgs");
+            WriteLine("            );");
+            WriteLine($"            return new {returnImplementationClassName}(handle, this._client);");
+            WriteLine("        })();");
+            WriteLine($"        return new {returnPromiseImplementationClassName}(promise, this._client);");
+            WriteLine("    }");
+            WriteLine();
+            return;
         }
 
         // Generate async method
+        WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
         Write($"    async {methodName}(");
         Write(paramsString);
         WriteLine($"): Promise<{returnType}> {{");
 
         // Extract optional params from options object
-        foreach (var param in optionalParams)
+        foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
         {
-            WriteLine($"        const {param.Name} = options?.{param.Name};");
+            var localParameterName = GetLocalParameterName(param);
+            WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
         }
 
-        // Build args object with conditional inclusion
-        var requiredArgs = new List<string> { $"{firstParamName}: this._handle" };
-        foreach (var param in requiredParams)
-        {
-            requiredArgs.Add(param.Name);
-        }
-        WriteLine($"        const rpcArgs: Record<string, unknown> = {{ {string.Join(", ", requiredArgs)} }};");
-        foreach (var param in optionalParams)
-        {
-            WriteLine($"        if ({param.Name} !== undefined) rpcArgs.{param.Name} = {param.Name};");
-        }
+        // Resolve promise-like params and build args
+        GenerateResolveAndBuildArgs(firstParamName, userParams, requiredParams, optionalParams, useSafeOptionalLocalNames: true);
 
         if (returnType == "void")
         {
@@ -1991,15 +2806,36 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// Generates a method on a type class using the thenable pattern.
     /// Generates both an internal async method and a public fluent method.
     /// </summary>
+    /// <remarks>
+    /// <para>Follows the same internal/public pair pattern as <see cref="GenerateBuilderMethod"/>
+    /// but operates on type classes (resources exposed via <c>ExposeMethods</c>).</para>
+    /// <para>Generated TypeScript (example for <c>withEnvironment</c> on <c>PostgresResource</c>):</para>
+    /// <code>
+    /// /** @internal */
+    /// async _withEnvironmentInternal(name: string, value: string): Promise&lt;PostgresResource&gt; {
+    ///     const rpcArgs: Record&lt;string, unknown&gt; = { context: this._handle, name, value };
+    ///     await this._client.invokeCapability&lt;void&gt;('...', rpcArgs);
+    ///     return this;
+    /// }
+    ///
+    /// withEnvironment(name: string, value: string): PostgresResourcePromise {
+    ///     return new PostgresResourcePromiseImpl(
+    ///         this._withEnvironmentInternal(name, value), this._client);
+    /// }
+    /// </code>
+    /// <para>For methods returning a different wrapper type, the internal method returns that
+    /// wrapper and the public method returns its promise class.</para>
+    /// </remarks>
     private void GenerateTypeClassMethod(BuilderModel model, AtsCapabilityInfo capability)
     {
-        var className = DeriveClassName(model.TypeId);
+        var className = TypeScriptApiProjector.DeriveClassName(model.TypeId);
         var promiseClass = $"{className}Promise";
+        var promiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(className);
 
         // Use OwningTypeName if available to extract method name, otherwise parse from MethodName
         var methodName = !string.IsNullOrEmpty(capability.OwningTypeName) && capability.MethodName.Contains('.')
             ? capability.MethodName[(capability.MethodName.LastIndexOf('.') + 1)..]
-            : GetTypeScriptMethodName(capability.MethodName);
+            : TypeScriptApiProjector.GetTypeScriptMethodName(capability.MethodName);
 
         var internalMethodName = $"_{methodName}Internal";
 
@@ -2008,50 +2844,38 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
         var userParams = capability.Parameters.Where(p => p.Name != targetParamName).ToList();
 
         // Separate required and optional parameters
-        var (requiredParams, optionalParams) = SeparateParameters(userParams);
+        var (requiredParams, optionalParams) = TypeScriptApiProjector.SeparateParameters(userParams);
         var hasOptionals = optionalParams.Count > 0;
-        var optionsInterfaceName = GetOptionsInterfaceName(methodName);
+        var hasDirectOptionsParameter = TypeScriptApiProjector.TryGetDirectOptionsParameter(optionalParams, out var directOptionsParam);
+        var optionsInterfaceName = hasDirectOptionsParameter ? _projector.MapParameterToTypeScript(directOptionsParam!) : _projector.ResolveOptionsInterfaceName(capability);
+        var publicOptionsParamName = TypeScriptApiProjector.GetImplementationOptionsParameterName(userParams, hasOptionals, hasDirectOptionsParameter);
 
         // Build parameter list for public method
-        var publicParamDefs = new List<string>();
-        foreach (var param in requiredParams)
-        {
-            var tsType = MapParameterToTypeScript(param);
-            publicParamDefs.Add($"{param.Name}: {tsType}");
-        }
-        if (hasOptionals)
-        {
-            publicParamDefs.Add($"options?: {optionsInterfaceName}");
-        }
-        var publicParamsString = string.Join(", ", publicParamDefs);
+        var publicParamsString = _projector.BuildPublicParameterList(requiredParams, hasOptionals, optionsInterfaceName, publicOptionsParamName, TypeScriptApiProjector.GetTrailingCancellationTokenParameter(optionalParams));
 
         // Build parameter list for internal method (all params positional)
         var internalParamDefs = new List<string>();
         foreach (var param in userParams)
         {
-            var tsType = MapParameterToTypeScript(param);
+            var tsType = _projector.MapParameterToTypeScript(param);
             var optional = param.IsOptional || param.IsNullable ? "?" : "";
             internalParamDefs.Add($"{param.Name}{optional}: {tsType}");
         }
         var internalParamsString = string.Join(", ", internalParamDefs);
 
         // Check if return type has a Promise wrapper
-        var returnPromiseWrapper = GetPromiseWrapperForReturnType(capability.ReturnType);
-        var returnType = MapTypeRefToTypeScript(capability.ReturnType);
+        var returnPromiseWrapper = _projector.GetPromiseWrapperForReturnType(capability.ReturnType);
+        var returnType = _projector.MapTypeRefToTypeScript(capability.ReturnType);
         var isVoid = capability.ReturnType == null || capability.ReturnType.TypeId == AtsConstants.Void;
-
-        // Generate JSDoc
-        if (!string.IsNullOrEmpty(capability.Description))
-        {
-            WriteLine($"    /** {capability.Description} */");
-        }
 
         // If return type has a Promise wrapper, generate internal + fluent pattern
         if (returnPromiseWrapper != null)
         {
-            var returnWrapperClass = _wrapperClassNames.GetValueOrDefault(capability.ReturnType!.TypeId)
-                ?? DeriveClassName(capability.ReturnType.TypeId);
-            var returnHandleType = GetHandleTypeName(capability.ReturnType.TypeId);
+            var returnWrapperClass = _projector.WrapperClassNames.GetValueOrDefault(capability.ReturnType!.TypeId)
+                ?? TypeScriptApiProjector.DeriveClassName(capability.ReturnType.TypeId);
+            var returnWrapperImplementationClass = TypeScriptApiProjector.GetImplementationClassName(returnWrapperClass);
+            var returnPromiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(returnWrapperClass);
+            var returnHandleType = _projector.GetConcreteHandleTypeName(capability.ReturnType.TypeId);
 
             // Generate internal async method
             WriteLine($"    /** @internal */");
@@ -2066,6 +2890,9 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
                 GenerateCallbackRegistration(callbackParam);
             }
 
+            // Resolve any promise-like handle parameters
+            GeneratePromiseResolution(userParams);
+
             // Build args with conditional inclusion
             GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams);
 
@@ -2073,24 +2900,36 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             WriteLine($"            '{capability.CapabilityId}',");
             WriteLine($"            rpcArgs");
             WriteLine("        );");
-            WriteLine($"        return new {returnWrapperClass}(result, this._client);");
+            WriteLine($"        return new {returnWrapperImplementationClass}(result, this._client);");
             WriteLine("    }");
             WriteLine();
 
             // Generate public fluent method that returns thenable wrapper
+            WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
             Write($"    {methodName}(");
             Write(publicParamsString);
             WriteLine($"): {returnPromiseWrapper} {{");
 
             // Extract optional params and forward
-            foreach (var param in optionalParams)
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
             {
-                WriteLine($"        const {param.Name} = options?.{param.Name};");
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
             }
 
-            Write($"        return new {returnPromiseWrapper}(this.{internalMethodName}(");
-            Write(string.Join(", ", userParams.Select(p => p.Name)));
-            WriteLine("));");
+            var internalCallArgs = userParams.Select(p => optionalParams.Contains(p) ? GetLocalParameterName(p) : p.Name);
+            var internalCall = $"this.{internalMethodName}({string.Join(", ", internalCallArgs)})";
+
+            // For build(), flush pending promises before invoking the internal method to avoid deadlock
+            if (string.Equals(methodName, "build", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteLine($"        const flushAndBuild = async () => {{ await this._client.flushPendingPromises(); return {internalCall}; }};");
+                WriteLine($"        return new {returnPromiseImplementationClass}(flushAndBuild(), this._client, false);");
+            }
+            else
+            {
+                WriteLine($"        return new {returnPromiseImplementationClass}({internalCall}, this._client);");
+            }
             WriteLine("    }");
         }
         else if (isVoid)
@@ -2109,6 +2948,9 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
                 GenerateCallbackRegistration(callbackParam);
             }
 
+            // Resolve any promise-like handle parameters
+            GeneratePromiseResolution(userParams);
+
             // Build args with conditional inclusion
             GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams);
 
@@ -2121,32 +2963,36 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
             WriteLine();
 
             // Generate public fluent method
+            WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
             Write($"    {methodName}(");
             Write(publicParamsString);
             WriteLine($"): {promiseClass} {{");
 
             // Extract optional params and forward
-            foreach (var param in optionalParams)
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
             {
-                WriteLine($"        const {param.Name} = options?.{param.Name};");
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
             }
 
-            Write($"        return new {promiseClass}(this.{internalMethodName}(");
-            Write(string.Join(", ", userParams.Select(p => p.Name)));
-            WriteLine("));");
+            Write($"        return new {promiseImplementationClass}(this.{internalMethodName}(");
+            Write(string.Join(", ", userParams.Select(p => optionalParams.Contains(p) ? GetLocalParameterName(p) : p.Name)));
+            WriteLine("), this._client);");
             WriteLine("    }");
         }
         else
         {
             // Non-void, non-wrapper return - plain async method
+            WriteCapabilityDocComment("    ", capability, requiredParams, hasOptionals ? publicOptionsParamName : null);
             Write($"    async {methodName}(");
             Write(publicParamsString);
             WriteLine($"): Promise<{returnType}> {{");
 
             // Extract optional params from options object
-            foreach (var param in optionalParams)
+            foreach (var param in hasDirectOptionsParameter ? [] : optionalParams)
             {
-                WriteLine($"        const {param.Name} = options?.{param.Name};");
+                var localParameterName = GetLocalParameterName(param);
+                WriteLine($"        {(_projector.IsWidenedHandleType(param.Type) ? "let" : "const")} {localParameterName} = {publicOptionsParamName}?.{param.Name};");
             }
 
             // Handle callback registration if any
@@ -2156,13 +3002,27 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
                 GenerateCallbackRegistration(callbackParam);
             }
 
-            // Build args with conditional inclusion
-            GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams);
+            // Resolve any promise-like handle parameters
+            GeneratePromiseResolution(userParams);
 
-            WriteLine($"        return await this._client.invokeCapability<{returnType}>(");
-            WriteLine($"            '{capability.CapabilityId}',");
-            WriteLine($"            rpcArgs");
-            WriteLine("        );");
+            // Build args with conditional inclusion
+            GenerateArgsObjectWithConditionals(targetParamName, requiredParams, optionalParams, useSafeOptionalLocalNames: true);
+
+            if (capability.ReturnType?.TypeId == AtsConstants.CancellationToken)
+            {
+                WriteLine("        const result = await this._client.invokeCapability<string | null>(");
+                WriteLine($"            '{capability.CapabilityId}',");
+                WriteLine("            rpcArgs");
+                WriteLine("        );");
+                WriteLine("        return CancellationToken.fromValue(result);");
+            }
+            else
+            {
+                WriteLine($"        return await this._client.invokeCapability<{returnType}>(");
+                WriteLine($"            '{capability.CapabilityId}',");
+                WriteLine($"            rpcArgs");
+                WriteLine("        );");
+            }
             WriteLine("    }");
         }
         WriteLine();
@@ -2171,460 +3031,71 @@ public sealed class AtsTypeScriptCodeGenerator : ICodeGenerator
     /// <summary>
     /// Generates a thenable wrapper class for a type class.
     /// </summary>
+    /// <remarks>
+    /// <para>Identical in structure to <see cref="GenerateThenableClass"/> but generated for
+    /// type classes (resources with <c>ExposeMethods</c>) rather than builder classes.</para>
+    /// <para>Generated TypeScript (example for <c>PostgresResource</c>):</para>
+    /// <code>
+    /// const PostgresResourcePromiseImpl =
+    ///     $aspireCreateFluentPromiseClass&lt;PostgresResource, PostgresResourcePromise&gt;(...);
+    /// </code>
+    /// </remarks>
     private void GenerateTypeClassThenableWrapper(BuilderModel model, List<AtsCapabilityInfo> methods)
     {
-        var className = DeriveClassName(model.TypeId);
+        var className = TypeScriptApiProjector.DeriveClassName(model.TypeId);
         var promiseClass = $"{className}Promise";
+        var promiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(className);
+        var transitions = new Dictionary<string, (string? PromiseImplementationClass, bool Track, bool TrackTransitions)>(StringComparer.Ordinal);
 
-        WriteLine($"/**");
-        WriteLine($" * Thenable wrapper for {className} that enables fluent chaining.");
-        WriteLine($" */");
-        WriteLine($"export class {promiseClass} implements PromiseLike<{className}> {{");
-        WriteLine($"    constructor(private _promise: Promise<{className}>) {{}}");
-        WriteLine();
+        var getters = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertyGetter).ToList();
+        var setters = model.Capabilities.Where(c => c.CapabilityKind == AtsCapabilityKind.PropertySetter).ToList();
+        var getterOnlyProperties = TypeScriptApiProjector.GroupPropertiesByName(getters, setters)
+            .Where(p => TypeScriptApiProjector.IsGetterOnlyProperty(p.Getter, p.Setter))
+            .ToList();
 
-        // Generate then() for PromiseLike interface
-        WriteLine($"    then<TResult1 = {className}, TResult2 = never>(");
-        WriteLine($"        onfulfilled?: ((value: {className}) => TResult1 | PromiseLike<TResult1>) | null,");
-        WriteLine("        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null");
-        WriteLine("    ): PromiseLike<TResult1 | TResult2> {");
-        WriteLine("        return this._promise.then(onfulfilled, onrejected);");
-        WriteLine("    }");
-        WriteLine();
-
-        // Generate fluent methods that chain via .then()
-        foreach (var capability in methods)
+        foreach (var prop in getterOnlyProperties)
         {
-            var methodName = !string.IsNullOrEmpty(capability.OwningTypeName) && capability.MethodName.Contains('.')
-                ? capability.MethodName[(capability.MethodName.LastIndexOf('.') + 1)..]
-                : GetTypeScriptMethodName(capability.MethodName);
-
-            var targetParamName = capability.TargetParameterName ?? "context";
-            var userParams = capability.Parameters.Where(p => p.Name != targetParamName).ToList();
-
-            // Separate required and optional parameters
-            var (requiredParams, optionalParams) = SeparateParameters(userParams);
-            var hasOptionals = optionalParams.Count > 0;
-            var optionsInterfaceName = GetOptionsInterfaceName(methodName);
-
-            // Build parameter list using options pattern
-            var publicParamDefs = new List<string>();
-            foreach (var param in requiredParams)
+            if (_projector.TryGetPromiseWrapperType(prop.Getter!.ReturnType, out _, out var propertyPromiseImplementationClassName))
             {
-                var tsType = MapParameterToTypeScript(param);
-                publicParamDefs.Add($"{param.Name}: {tsType}");
-            }
-            if (hasOptionals)
-            {
-                publicParamDefs.Add($"options?: {optionsInterfaceName}");
-            }
-            var paramsString = string.Join(", ", publicParamDefs);
-
-            // Forward args to underlying object's public method
-            var forwardArgs = new List<string>();
-            foreach (var param in requiredParams)
-            {
-                forwardArgs.Add(param.Name);
-            }
-            if (hasOptionals)
-            {
-                forwardArgs.Add("options");
-            }
-            var argsString = string.Join(", ", forwardArgs);
-
-            // Check if return type has a Promise wrapper
-            var returnPromiseWrapper = GetPromiseWrapperForReturnType(capability.ReturnType);
-            var returnType = MapTypeRefToTypeScript(capability.ReturnType);
-            var isVoid = capability.ReturnType == null || capability.ReturnType.TypeId == AtsConstants.Void;
-
-            if (!string.IsNullOrEmpty(capability.Description))
-            {
-                WriteLine($"    /** {capability.Description} */");
-            }
-
-            if (returnPromiseWrapper != null)
-            {
-                // Return type has Promise wrapper - forward to public method, wrap result
-                Write($"    {methodName}(");
-                Write(paramsString);
-                WriteLine($"): {returnPromiseWrapper} {{");
-                Write($"        return new {returnPromiseWrapper}(this._promise.then(obj => obj.{methodName}(");
-                Write(argsString);
-                WriteLine(")));");
-                WriteLine("    }");
-            }
-            else if (isVoid)
-            {
-                // Void return - forward to public method, wrap result in this class's promise
-                Write($"    {methodName}(");
-                Write(paramsString);
-                WriteLine($"): {promiseClass} {{");
-                Write($"        return new {promiseClass}(this._promise.then(obj => obj.{methodName}(");
-                Write(argsString);
-                WriteLine(")));");
-                WriteLine("    }");
+                transitions[prop.PropertyName] = (propertyPromiseImplementationClassName, Track: false, TrackTransitions: true);
             }
             else
             {
-                // Non-void, non-wrapper return - plain Promise
-                Write($"    {methodName}(");
-                Write(paramsString);
-                WriteLine($"): Promise<{returnType}> {{");
-                Write($"        return this._promise.then(obj => obj.{methodName}(");
-                Write(argsString);
-                WriteLine("));");
-                WriteLine("    }");
+                transitions[prop.PropertyName] = (PromiseImplementationClass: null, Track: false, TrackTransitions: true);
             }
-            WriteLine();
         }
 
-        WriteLine("}");
-        WriteLine();
+        foreach (var capability in methods)
+        {
+            var signature = _projector.ResolveMethodSignature(model, capability);
+            var returnPromiseWrapper = _projector.GetPromiseWrapperForReturnType(capability.ReturnType);
+            var methodName = signature.MethodName;
+            // Keep forwarded build transitions and their derived chains out of build()'s flush.
+            var isBuild = string.Equals(methodName, "build", StringComparison.OrdinalIgnoreCase);
+            var trackTransition = !isBuild;
+            var isVoid = capability.ReturnType == null || capability.ReturnType.TypeId == AtsConstants.Void;
+            if (returnPromiseWrapper != null)
+            {
+                var returnPromiseImplementationClass = TypeScriptApiProjector.GetImplementationPromiseClassName(
+                    _projector.WrapperClassNames.GetValueOrDefault(capability.ReturnType!.TypeId)
+                        ?? TypeScriptApiProjector.DeriveClassName(capability.ReturnType.TypeId));
+                transitions[methodName] = (returnPromiseImplementationClass, Track: trackTransition, TrackTransitions: !isBuild);
+            }
+            else if (isVoid)
+            {
+                transitions[methodName] = (promiseImplementationClass, Track: trackTransition, TrackTransitions: !isBuild);
+            }
+            else
+            {
+                transitions[methodName] = (PromiseImplementationClass: null, Track: false, TrackTransitions: true);
+            }
+        }
+
+        GenerateFluentPromiseImplementation(className, promiseClass, promiseImplementationClass, transitions);
     }
 
     // ============================================================================
     // Builder Model Helpers (replaces AtsBuilderModelFactory)
     // ============================================================================
 
-    /// <summary>
-    /// Groups capabilities by ExpandedTargetTypes to create builder models.
-    /// Uses expansion to map interface targets to their concrete implementations.
-    /// Also creates builders for interface types (for use as return type wrappers).
-    /// </summary>
-    private static List<BuilderModel> CreateBuilderModels(IReadOnlyList<AtsCapabilityInfo> capabilities)
-    {
-        // Group capabilities by expanded target type IDs
-        // A capability targeting IResource with ExpandedTargetTypes = [RedisResource]
-        // will be assigned to Aspire.Hosting.Redis/RedisResource (the concrete type)
-        var capabilitiesByTypeId = new Dictionary<string, List<AtsCapabilityInfo>>();
-
-        // Track the AtsTypeRef for each typeId (from ExpandedTargetTypes or TargetType metadata)
-        var typeRefsByTypeId = new Dictionary<string, AtsTypeRef>();
-
-        // Also track interface types and their capabilities (for interface wrapper classes)
-        var interfaceCapabilities = new Dictionary<string, List<AtsCapabilityInfo>>();
-
-        foreach (var cap in capabilities)
-        {
-            var targetTypeRef = cap.TargetType;
-            var targetTypeId = cap.TargetTypeId;
-            if (targetTypeRef == null || string.IsNullOrEmpty(targetTypeId))
-            {
-                // Entry point methods - handled separately
-                continue;
-            }
-
-            // Use category-based check instead of string parsing
-            if (targetTypeRef.Category != AtsTypeCategory.Handle)
-            {
-                continue;
-            }
-
-            // Use expanded types if available, otherwise fall back to the original target
-            var expandedTypes = cap.ExpandedTargetTypes;
-            if (expandedTypes is { Count: > 0 })
-            {
-                // Flatten to concrete types
-                foreach (var expandedType in expandedTypes)
-                {
-                    if (!capabilitiesByTypeId.TryGetValue(expandedType.TypeId, out var list))
-                    {
-                        list = [];
-                        capabilitiesByTypeId[expandedType.TypeId] = list;
-                        // Store the type ref for this expanded type
-                        typeRefsByTypeId[expandedType.TypeId] = expandedType;
-                    }
-                    list.Add(cap);
-                }
-
-                // Also track the original interface type for wrapper class generation
-                if (targetTypeRef.IsInterface)
-                {
-                    if (!interfaceCapabilities.TryGetValue(targetTypeId, out var interfaceList))
-                    {
-                        interfaceList = [];
-                        interfaceCapabilities[targetTypeId] = interfaceList;
-                        // Store the type ref for the interface
-                        typeRefsByTypeId[targetTypeId] = targetTypeRef;
-                    }
-                    interfaceList.Add(cap);
-                }
-            }
-            else
-            {
-                // No expansion - use original target (concrete type)
-                if (!capabilitiesByTypeId.TryGetValue(targetTypeId, out var list))
-                {
-                    list = [];
-                    capabilitiesByTypeId[targetTypeId] = list;
-                    // Store the type ref for this target type
-                    typeRefsByTypeId[targetTypeId] = targetTypeRef;
-                }
-                list.Add(cap);
-            }
-        }
-
-        // Create a builder for each concrete type with its specific capabilities
-        var builders = new List<BuilderModel>();
-        foreach (var (typeId, typeCapabilities) in capabilitiesByTypeId)
-        {
-            var builderClassName = DeriveClassName(typeId);
-
-            // Get the type ref from tracked metadata (based on target type, not return type)
-            var typeRef = typeRefsByTypeId.GetValueOrDefault(typeId);
-
-            // Deduplicate capabilities by CapabilityId to avoid duplicate methods
-            var uniqueCapabilities = typeCapabilities
-                .GroupBy(c => c.CapabilityId)
-                .Select(g => g.First())
-                .ToList();
-
-            var builder = new BuilderModel
-            {
-                TypeId = typeId,
-                BuilderClassName = builderClassName,
-                Capabilities = uniqueCapabilities,
-                IsInterface = typeRef?.IsInterface ?? false,
-                TargetType = typeRef
-            };
-
-            builders.Add(builder);
-        }
-
-        // Also create builders for interface types (for use as return type wrappers)
-        // These are needed when methods return interface types like IResourceWithConnectionString
-        foreach (var (interfaceTypeId, caps) in interfaceCapabilities)
-        {
-            // Skip if already added (shouldn't happen, but be safe)
-            if (capabilitiesByTypeId.ContainsKey(interfaceTypeId))
-            {
-                continue;
-            }
-
-            var builderClassName = DeriveClassName(interfaceTypeId);
-
-            // Get the type ref from tracked metadata
-            var typeRef = typeRefsByTypeId.GetValueOrDefault(interfaceTypeId);
-
-            // Deduplicate capabilities
-            var uniqueCapabilities = caps
-                .GroupBy(c => c.CapabilityId)
-                .Select(g => g.First())
-                .ToList();
-
-            var builder = new BuilderModel
-            {
-                TypeId = interfaceTypeId,
-                BuilderClassName = builderClassName,
-                Capabilities = uniqueCapabilities,
-                IsInterface = true,
-                TargetType = typeRef
-            };
-
-            builders.Add(builder);
-        }
-
-        // Also create builders for resource types referenced anywhere in capabilities
-        // This handles types like RedisCommanderResource that appear in callback signatures,
-        // return types, or parameter types but aren't capability targets
-        var allReferencedTypeRefs = CollectAllReferencedTypes(capabilities);
-
-        // Track all types we already have builders for (concrete + interface)
-        var existingBuilderTypeIds = new HashSet<string>(capabilitiesByTypeId.Keys);
-        foreach (var (interfaceTypeId, _) in interfaceCapabilities)
-        {
-            existingBuilderTypeIds.Add(interfaceTypeId);
-        }
-
-        foreach (var (typeId, typeRef) in allReferencedTypeRefs)
-        {
-            // Skip types we already have builders for (from concrete or interface lists)
-            if (existingBuilderTypeIds.Contains(typeId))
-            {
-                continue;
-            }
-
-            // Only create builders for resource types (using metadata instead of string parsing)
-            if (!typeRef.IsResourceBuilder)
-            {
-                continue;
-            }
-
-            var builderClassName = DeriveClassName(typeId);
-            var builder = new BuilderModel
-            {
-                TypeId = typeId,
-                BuilderClassName = builderClassName,
-                Capabilities = [],  // No specific capabilities - uses base type methods
-                IsInterface = typeRef.IsInterface,
-                TargetType = typeRef
-            };
-            builders.Add(builder);
-        }
-
-        // Deduplicate builders by class name, preferring concrete types over interfaces.
-        // This handles cases where both a concrete type (e.g. AzureKeyVaultResource) and
-        // its interface (IAzureKeyVaultResource → AzureKeyVaultResource) produce the same class name.
-        // Sort: concrete types first, then interfaces
-        return builders
-            .OrderBy(b => b.IsInterface)
-            .ThenBy(b => b.BuilderClassName)
-            .GroupBy(b => b.BuilderClassName)
-            .Select(g => g.First())
-            .ToList();
-    }
-
-    /// <summary>
-    /// Collects all type refs referenced in capabilities (return types, parameter types, callback types, etc.)
-    /// Returns a dictionary mapping typeId to AtsTypeRef for use in builder creation.
-    /// </summary>
-    private static Dictionary<string, AtsTypeRef> CollectAllReferencedTypes(IReadOnlyList<AtsCapabilityInfo> capabilities)
-    {
-        var typeRefs = new Dictionary<string, AtsTypeRef>();
-
-        void CollectFromTypeRef(AtsTypeRef? typeRef)
-        {
-            if (typeRef == null)
-            {
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(typeRef.TypeId) && typeRef.Category == AtsTypeCategory.Handle)
-            {
-                typeRefs.TryAdd(typeRef.TypeId, typeRef);
-            }
-
-            // Also check nested types (generics, arrays, etc.)
-            CollectFromTypeRef(typeRef.ElementType);
-            CollectFromTypeRef(typeRef.KeyType);
-            CollectFromTypeRef(typeRef.ValueType);
-            if (typeRef.UnionTypes != null)
-            {
-                foreach (var unionType in typeRef.UnionTypes)
-                {
-                    CollectFromTypeRef(unionType);
-                }
-            }
-        }
-
-        foreach (var cap in capabilities)
-        {
-            // Check return type
-            CollectFromTypeRef(cap.ReturnType);
-
-            // Check parameter types
-            foreach (var param in cap.Parameters)
-            {
-                CollectFromTypeRef(param.Type);
-
-                // Check callback parameter types and return type
-                if (param.IsCallback)
-                {
-                    if (param.CallbackParameters != null)
-                    {
-                        foreach (var cbParam in param.CallbackParameters)
-                        {
-                            CollectFromTypeRef(cbParam.Type);
-                        }
-                    }
-                    CollectFromTypeRef(param.CallbackReturnType);
-                }
-            }
-        }
-
-        return typeRefs;
-    }
-
-    /// <summary>
-    /// Gets entry point capabilities (those without TargetTypeId).
-    /// </summary>
-    private static List<AtsCapabilityInfo> GetEntryPointCapabilities(IReadOnlyList<AtsCapabilityInfo> capabilities)
-    {
-        return capabilities.Where(c => string.IsNullOrEmpty(c.TargetTypeId)).ToList();
-    }
-
-    /// <summary>
-    /// Derives the class name from an ATS type ID.
-    /// For interfaces like IResource, strips the leading 'I'.
-    /// </summary>
-    private static string DeriveClassName(string typeId)
-    {
-        var typeName = ExtractSimpleTypeName(typeId);
-
-        // Strip leading 'I' from interface types
-        if (typeName.StartsWith('I') && typeName.Length > 1 && char.IsUpper(typeName[1]))
-        {
-            return typeName[1..];
-        }
-
-        return typeName;
-    }
-
-    /// <summary>
-    /// Gets the handle type alias name for a type ID.
-    /// </summary>
-    private static string GetHandleTypeName(string typeId)
-    {
-        var typeName = ExtractSimpleTypeName(typeId);
-
-        // Sanitize generic types like "Dict<String,Object>" -> "DictStringObject"
-        // and array types like "string[]" -> "stringArray"
-        typeName = typeName
-            .Replace("[]", "Array", StringComparison.Ordinal)
-            .Replace("<", "", StringComparison.Ordinal)
-            .Replace(">", "", StringComparison.Ordinal)
-            .Replace(",", "", StringComparison.Ordinal);
-
-        return $"{typeName}Handle";
-    }
-
-    /// <summary>
-    /// Extracts the simple type name from a type ID.
-    /// </summary>
-    /// <example>
-    /// "Aspire.Hosting/Aspire.Hosting.ApplicationModel.IResource" → "IResource"
-    /// "Aspire.Hosting/Aspire.Hosting.DistributedApplication" → "DistributedApplication"
-    /// </example>
-    private static string ExtractSimpleTypeName(string typeId)
-    {
-        var slashIndex = typeId.LastIndexOf('/');
-        var fullTypeName = slashIndex >= 0 ? typeId[(slashIndex + 1)..] : typeId;
-
-        var dotIndex = fullTypeName.LastIndexOf('.');
-        return dotIndex >= 0 ? fullTypeName[(dotIndex + 1)..] : fullTypeName;
-    }
-
-    /// <summary>
-    /// Determines if a type has chainable methods and should have a Promise wrapper.
-    /// Types with instance methods or wrapper methods get Promise wrappers.
-    /// </summary>
-    private static bool HasChainableMethods(BuilderModel model)
-    {
-        // Check for instance methods (from ExposeMethods=true) or wrapper methods
-        return model.Capabilities.Any(c =>
-            c.CapabilityKind == AtsCapabilityKind.InstanceMethod ||
-            c.CapabilityKind == AtsCapabilityKind.Method);
-    }
-
-    /// <summary>
-    /// Gets the Promise wrapper class name for a return type, if one exists.
-    /// Returns null if the return type doesn't have a Promise wrapper.
-    /// </summary>
-    private string? GetPromiseWrapperForReturnType(AtsTypeRef? returnType)
-    {
-        if (returnType == null)
-        {
-            return null;
-        }
-
-        // Check if the return type has a Promise wrapper
-        if (_typesWithPromiseWrappers.Contains(returnType.TypeId))
-        {
-            var className = _wrapperClassNames.GetValueOrDefault(returnType.TypeId)
-                ?? DeriveClassName(returnType.TypeId);
-            return $"{className}Promise";
-        }
-
-        return null;
-    }
 }

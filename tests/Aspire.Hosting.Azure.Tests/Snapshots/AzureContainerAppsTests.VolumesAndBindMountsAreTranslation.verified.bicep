@@ -11,7 +11,7 @@ param env_outputs_volumes_api_1 string
 
 param env_outputs_bindmounts_api_0 string
 
-resource api 'Microsoft.App/containerApps@2025-01-01' = {
+resource api 'Microsoft.App/containerApps@2025-07-01' = {
   name: 'api'
   location: location
   properties: {
@@ -24,6 +24,12 @@ resource api 'Microsoft.App/containerApps@2025-01-01' = {
         {
           image: 'myimage:latest'
           name: 'api'
+          env: [
+            {
+              name: 'DATA_PATH'
+              value: '/path1'
+            }
+          ]
           volumeMounts: [
             {
               volumeName: 'v0'

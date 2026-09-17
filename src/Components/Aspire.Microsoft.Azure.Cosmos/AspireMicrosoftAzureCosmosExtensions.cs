@@ -1,12 +1,13 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire;
 using Aspire.Hosting.Azure.CosmosDB;
 using Aspire.Microsoft.Azure.Cosmos;
-using Azure.Identity;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace Microsoft.Extensions.Hosting;
 
@@ -16,6 +17,7 @@ namespace Microsoft.Extensions.Hosting;
 public static class AspireMicrosoftAzureCosmosExtensions
 {
     private const string DefaultConfigSectionName = "Aspire:Microsoft:Azure:Cosmos";
+    private const string HealthCheckName = "Microsoft.Azure.Cosmos";
 
     /// <summary>
     /// Registers <see cref="CosmosClient" /> as a singleton in the services provided by the <paramref name="builder"/>.
@@ -36,6 +38,7 @@ public static class AspireMicrosoftAzureCosmosExtensions
         var settings = builder.GetSettings(connectionName, configureSettings);
         var clientOptions = builder.GetClientOptions(settings, configureClientOptions);
         builder.Services.AddSingleton(sp => GetCosmosClient(connectionName, settings, clientOptions));
+        builder.AddCosmosHealthCheck(settings, serviceKey: null);
     }
 
     /// <summary>
@@ -100,6 +103,7 @@ public static class AspireMicrosoftAzureCosmosExtensions
             var client = GetCosmosClient(name, settings, clientOptions);
             return client;
         });
+        builder.AddCosmosHealthCheck(settings, serviceKey: name);
     }
 
     /// <summary>
@@ -183,6 +187,24 @@ public static class AspireMicrosoftAzureCosmosExtensions
         var cosmosDatabaseBuilder = new CosmosDatabaseBuilder(builder, name, settings, clientOptions);
         cosmosDatabaseBuilder.AddKeyedDatabase();
         return cosmosDatabaseBuilder;
+    }
+
+    private static void AddCosmosHealthCheck(this IHostApplicationBuilder builder, MicrosoftAzureCosmosSettings settings, object? serviceKey)
+    {
+        if (settings.DisableHealthChecks)
+        {
+            return;
+        }
+
+        builder.TryAddHealthCheck(new HealthCheckRegistration(
+            serviceKey is null ? HealthCheckName : $"{HealthCheckName}_{serviceKey}",
+            sp => new AzureCosmosDbHealthCheck(
+                serviceKey is null
+                    ? sp.GetRequiredService<CosmosClient>()
+                    : sp.GetRequiredKeyedService<CosmosClient>(serviceKey)),
+            failureStatus: default,
+            tags: default,
+            timeout: default));
     }
 
     internal static CosmosConnectionInfo? GetCosmosConnectionInfo(this IHostApplicationBuilder builder, string connectionName)
@@ -272,7 +294,7 @@ public static class AspireMicrosoftAzureCosmosExtensions
         }
         else if (settings.AccountEndpoint is not null)
         {
-            var credential = settings.Credential ?? new DefaultAzureCredential();
+            var credential = settings.Credential ?? AzureCredentialHelper.CreateDefaultAzureCredential();
             return new CosmosClient(settings.AccountEndpoint.OriginalString, credential, clientOptions);
         }
         else

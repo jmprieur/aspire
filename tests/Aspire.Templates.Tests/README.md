@@ -55,11 +55,19 @@ The SDK in `artifacts/bin/dotnet-tests` is usable outside the repo at this point
 
 ## Inner loop tips
 
+`NewUpAndBuildStandaloneTemplateTests` covers the three default application templates.
+`NewUpAndBuildStarterTestFrameworkTemplateTests` covers MSTest, NUnit, and default xUnit;
+`NewUpAndBuildStarterXUnitVersionTemplateTests` covers explicit xUnit v2, v3, and v3mtp.
+Each class runs 51 cases across the SDK/target-framework matrix. Keeping them separate
+lets CI shard all 153 cases without tripling a single job's runtime. The framework
+tests check generated package names, versions, and executable output where required
+before building, so update these expectations when changing starter test dependencies.
+
 - The sdk+workload is never updated automatically. In other words, once installed the workload packs don't get overwritten even when the source binaries changes in `artifacts`. This may change in future.
 
 There are three categories of NuGet packages used by the workload:
 
-1. `Aspire.Dashboard.Sdk.osx-arm64`, `Aspire.Hosting.Orchestration.osx-arm64`, and `Aspire.AppHost.Sdk`
+1. `Aspire.Dashboard.Sdk.osx-arm64`, `Aspire.TerminalHost.Sdk.osx-arm64`, `Aspire.Hosting.Orchestration.osx-arm64`, and `Aspire.AppHost.Sdk`
     - these are installed in `artifacts/bin/dotnet-tests/packs/`
     - Once the workload is installed, these are never updated automatically, so any changes made locally won't show up in the tests
 

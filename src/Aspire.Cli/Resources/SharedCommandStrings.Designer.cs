@@ -69,9 +69,27 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        internal static string AppHostNotRunningInCurrentWorktree {
+            get {
+                return ResourceManager.GetString("AppHostNotRunningInCurrentWorktree", resourceCulture);
+            }
+        }
+
+        internal static string AppHostNotRunningAtPath {
+            get {
+                return ResourceManager.GetString("AppHostNotRunningAtPath", resourceCulture);
+            }
+        }
+
         internal static string AppHostOptionDescription {
             get {
                 return ResourceManager.GetString("AppHostOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string IncludeHiddenOptionDescription {
+            get {
+                return ResourceManager.GetString("IncludeHiddenOptionDescription", resourceCulture);
             }
         }
 
@@ -81,9 +99,81 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        internal static string LsCommandDescription {
+            get {
+                return ResourceManager.GetString("LsCommandDescription", resourceCulture);
+            }
+        }
+
+        internal static string LsFormatOptionDescription {
+            get {
+                return ResourceManager.GetString("LsFormatOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string LsAllOptionDescription {
+            get {
+                return ResourceManager.GetString("LsAllOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string LsStreamOptionDescription {
+            get {
+                return ResourceManager.GetString("LsStreamOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string LsStreamRequiresJson {
+            get {
+                return ResourceManager.GetString("LsStreamRequiresJson", resourceCulture);
+            }
+        }
+
+        internal static string LsNoCandidateAppHostsFound {
+            get {
+                return ResourceManager.GetString("LsNoCandidateAppHostsFound", resourceCulture);
+            }
+        }
+
+        internal static string LsSearchingForAppHostsStatus {
+            get {
+                return ResourceManager.GetString("LsSearchingForAppHostsStatus", resourceCulture);
+            }
+        }
+
+        internal static string HeaderPath {
+            get {
+                return ResourceManager.GetString("HeaderPath", resourceCulture);
+            }
+        }
+
+        internal static string HeaderLanguage {
+            get {
+                return ResourceManager.GetString("HeaderLanguage", resourceCulture);
+            }
+        }
+
+        internal static string HeaderStatus {
+            get {
+                return ResourceManager.GetString("HeaderStatus", resourceCulture);
+            }
+        }
+
         internal static string IsolatedOptionDescription {
             get {
                 return ResourceManager.GetString("IsolatedOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string LaunchProfileOptionDescription {
+            get {
+                return ResourceManager.GetString("LaunchProfileOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string LaunchProfileNotSupported {
+            get {
+                return ResourceManager.GetString("LaunchProfileNotSupported", resourceCulture);
             }
         }
 
@@ -96,6 +186,87 @@ namespace Aspire.Cli.Resources {
         internal static string MultipleInScopeAppHosts {
             get {
                 return ResourceManager.GetString("MultipleInScopeAppHosts", resourceCulture);
+            }
+        }
+
+        /// <summary>
+        ///   Looks up a localized string similar to Multiple running AppHosts were found, but the CLI is running in non-interactive mode. Pass --apphost to specify which AppHost to use..
+        /// </summary>
+        internal static string MultipleAppHostsNonInteractive {
+            get {
+                return ResourceManager.GetString("MultipleAppHostsNonInteractive", resourceCulture);
+            }
+        }
+
+        internal static string PromptRunAgentInit {
+            get {
+                return ResourceManager.GetString("PromptRunAgentInit", resourceCulture);
+            }
+        }
+
+        internal static string AgentInitOptionDescription {
+            get {
+                return ResourceManager.GetString("AgentInitOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineLogLevelOptionDescription {
+            get {
+                return ResourceManager.GetString("PipelineLogLevelOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineIncludeExceptionDetailsOptionDescription {
+            get {
+                return ResourceManager.GetString("PipelineIncludeExceptionDetailsOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineEnvironmentOptionDescription {
+            get {
+                return ResourceManager.GetString("PipelineEnvironmentOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineListStepsOptionDescription {
+            get {
+                return ResourceManager.GetString("PipelineListStepsOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineFormatOptionDescription {
+            get {
+                return ResourceManager.GetString("PipelineFormatOptionDescription", resourceCulture);
+            }
+        }
+
+        internal static string PipelineStepTimelineLabel {
+            get {
+                return ResourceManager.GetString("PipelineStepTimelineLabel", resourceCulture);
+            }
+        }
+
+        internal static string PipelineStepsSummaryTitle {
+            get {
+                return ResourceManager.GetString("PipelineStepsSummaryTitle", resourceCulture);
+            }
+        }
+
+        internal static string PipelineFormatRequiresListSteps {
+            get {
+                return ResourceManager.GetString("PipelineFormatRequiresListSteps", resourceCulture);
+            }
+        }
+
+        internal static string NonInteractiveRequiresYesFormat {
+            get {
+                return ResourceManager.GetString("NonInteractiveRequiresYesFormat", resourceCulture);
+            }
+        }
+
+        internal static string UnrecognizedOptionDidYouMeanFormat {
+            get {
+                return ResourceManager.GetString("UnrecognizedOptionDidYouMeanFormat", resourceCulture);
             }
         }
     }

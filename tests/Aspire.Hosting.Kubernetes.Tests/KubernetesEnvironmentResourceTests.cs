@@ -5,18 +5,18 @@
 using System.Runtime.CompilerServices;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Kubernetes;
 using Aspire.Hosting.Utils;
 using Aspire.TestUtilities;
 using Microsoft.Extensions.DependencyInjection;
 
-public class KubernetesEnvironmentResourceTests(ITestOutputHelper output)
+public class KubernetesEnvironmentResourceTests(ITestOutputHelper outputHelper)
 {
     [Fact]
     public async Task PublishingKubernetesEnvironmentPublishesFile()
     {
-        var tempDir = Directory.CreateTempSubdirectory(".k8s-test");
-        output.WriteLine($"Temp directory: {tempDir.FullName}");
-        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, tempDir.FullName);
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, workspace.Path);
 
         builder.AddKubernetesEnvironment("env");
 
@@ -26,19 +26,17 @@ public class KubernetesEnvironmentResourceTests(ITestOutputHelper output)
         var app = builder.Build();
         app.Run();
 
-        var chartYaml = Path.Combine(tempDir.FullName, "Chart.yaml");
-        var valuesYaml = Path.Combine(tempDir.FullName, "values.yaml");
-        var deploymentYaml = Path.Combine(tempDir.FullName, "templates", "service", "deployment.yaml");
+        var chartYaml = Path.Combine(workspace.Path, "Chart.yaml");
+        var valuesYaml = Path.Combine(workspace.Path, "values.yaml");
+        var deploymentYaml = Path.Combine(workspace.Path, "templates", "service", "deployment.yaml");
 
         await Verify(File.ReadAllText(chartYaml), "yaml")
             .AppendContentAsFile(File.ReadAllText(valuesYaml), "yaml")
             .AppendContentAsFile(File.ReadAllText(deploymentYaml), "yaml");
-
-        tempDir.Delete(recursive: true);
     }
 
     [Fact]
-    [ActiveIssue("https://github.com/dotnet/aspire/issues/11818", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningFromAzdo))]
+    [ActiveIssue("https://github.com/microsoft/aspire/issues/11818", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningFromAzdo))]
     public async Task PublishAsKubernetesService_ThrowsIfNoEnvironment()
     {
         static async Task RunTest(Action<IDistributedApplicationBuilder> action)
@@ -70,12 +68,33 @@ public class KubernetesEnvironmentResourceTests(ITestOutputHelper output)
     }
 
     [Fact]
-    [ActiveIssue("https://github.com/dotnet/aspire/issues/11818", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningFromAzdo))]
+    public async Task ValidateKubernetes_DoesNotThrowInRunMode()
+    {
+        // Regression test for https://github.com/microsoft/aspire/issues/16940.
+        // In run mode, AddKubernetesEnvironment does not add the env resource to the model.
+        // If a compute resource still ends up with a KubernetesServiceCustomizationAnnotation
+        // (e.g. via WithAnnotation), the validation step should not throw at 'aspire run' time —
+        // PublishAs* customizations are only meaningful at publish/deploy time.
+        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Run);
+
+        builder.AddKubernetesEnvironment("env");
+
+        builder.AddContainer("api", "myimage")
+            .WithAnnotation(new KubernetesServiceCustomizationAnnotation((_) => { }));
+
+        using var app = builder.Build();
+
+        await ExecuteBeforeStartHooksAsync(app, default);
+    }
+
+    [Fact]
+    [ActiveIssue("https://github.com/microsoft/aspire/issues/11818", typeof(PlatformDetection), nameof(PlatformDetection.IsRunningFromAzdo))]
     public async Task MultipleKubernetesEnvironmentsSupported()
     {
-        using var tempDir = new TestTempDirectory();
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var outputPath = Path.Combine(workspace.Path, "output");
 
-        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, tempDir.Path);
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, outputPath);
 
         var env1 = builder.AddKubernetesEnvironment("env1");
         var env2 = builder.AddKubernetesEnvironment("env2");
@@ -91,7 +110,7 @@ public class KubernetesEnvironmentResourceTests(ITestOutputHelper output)
         // Publishing will stop the app when it is done
         await app.RunAsync();
 
-        await VerifyDirectory(tempDir.Path);
+        await VerifyDirectory(outputPath);
     }
 
     [Fact]
@@ -175,6 +194,71 @@ public class KubernetesEnvironmentResourceTests(ITestOutputHelper output)
         Assert.Null(containerDockerResource.GetDeploymentTargetAnnotation(kubernetes.Resource));
         Assert.Null(projectK8sResource.GetDeploymentTargetAnnotation(dockerCompose.Resource));
         Assert.Null(projectDockerResource.GetDeploymentTargetAnnotation(kubernetes.Resource));
+    }
+
+    [Fact]
+    public async Task KubernetesPersistentVolumeCannotTargetDockerCompose()
+    {
+        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+        var kubernetes = builder.AddKubernetesEnvironment("kubernetes");
+        var dockerCompose = builder.AddDockerComposeEnvironment("docker-compose");
+        var volume = kubernetes.AddPersistentVolume("data");
+
+        builder.AddProject<Projects.ServiceA>("project", launchProfileName: null)
+            .WithComputeEnvironment(dockerCompose)
+            .WithPersistentVolume(volume, "/srv/data", env: "DATA_PATH");
+
+        using var app = builder.Build();
+        var exception = await Assert.ThrowsAsync<DistributedApplicationException>(
+            () => ExecuteBeforeStartHooksAsync(app, CancellationToken.None));
+
+        Assert.Contains("project", exception.Message);
+        Assert.Contains("docker-compose", exception.Message);
+        Assert.Contains("data", exception.Message);
+        Assert.Contains("kubernetes", exception.Message);
+    }
+
+    [Fact]
+    public async Task RunningTheDeploymentTargetHooksTwiceLeavesOneTargetPerEnvironment()
+    {
+        // The prepare-deployment-target step declares RequiredBySteps = [BeforeStart], so it runs once in
+        // the BeforeStart pipeline and again in the publish DAG. Without a guard the second pass adds a
+        // second DeploymentTargetAnnotation, and GetDeploymentTargetAnnotation then throws on the
+        // ambiguity, which fails every publish that goes through both paths.
+        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        var kubernetes = builder.AddKubernetesEnvironment("kubernetes");
+        var dockerCompose = builder.AddDockerComposeEnvironment("docker-compose");
+
+        builder.AddContainer("containerk8s", "nginx")
+            .WithHttpEndpoint(port: 8080, targetPort: 80, name: "http")
+            .WithComputeEnvironment(kubernetes);
+
+        builder.AddContainer("containerdocker", "nginx")
+            .WithHttpEndpoint(port: 9090, targetPort: 80, name: "http")
+            .WithComputeEnvironment(dockerCompose);
+
+        using var app = builder.Build();
+
+        await ExecuteBeforeStartHooksAsync(app, default);
+        await ExecuteBeforeStartHooksAsync(app, default);
+
+        var model = app.Services.GetRequiredService<DistributedApplicationModel>();
+
+        var containerK8sResource = model.Resources.First(r => r.Name == "containerk8s");
+        var containerDockerResource = model.Resources.First(r => r.Name == "containerdocker");
+
+        Assert.Single(containerK8sResource.Annotations.OfType<DeploymentTargetAnnotation>());
+        Assert.Single(containerDockerResource.Annotations.OfType<DeploymentTargetAnnotation>());
+
+        Assert.Same(kubernetes.Resource, containerK8sResource.GetDeploymentTargetAnnotation()!.ComputeEnvironment);
+        Assert.Same(dockerCompose.Resource, containerDockerResource.GetDeploymentTargetAnnotation()!.ComputeEnvironment);
+
+        // The second pass must not have produced a fresh, unconfigured target either: the Kubernetes
+        // service still has to carry the endpoint that was mapped on the first pass.
+        var service = Assert.IsType<KubernetesResource>(containerK8sResource.GetDeploymentTargetAnnotation()!.DeploymentTarget);
+        var mapping = Assert.Contains("http", service.EndpointMappings);
+        Assert.Equal("http", mapping.Scheme);
     }
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ExecuteBeforeStartHooksAsync")]

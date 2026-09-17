@@ -29,7 +29,8 @@ public static class KafkaBuilderExtensions
     /// <param name="name">The name of the resource. This name will be used as the connection string name when referenced in a dependency</param>
     /// <param name="port">The host port of Kafka broker.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KafkaServerResource}"/>.</returns>
-    [AspireExport("addKafka", Description = "Adds a Kafka container resource")]
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<KafkaServerResource> AddKafka(this IDistributedApplicationBuilder builder, [ResourceName] string name, int? port = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -51,21 +52,20 @@ public static class KafkaBuilderExtensions
 
         var healthCheckKey = $"{name}_check";
 
-        // NOTE: We cannot use AddKafka here because it registers the health check as a singleton
-        //       which means if you have multiple Kafka resources the factory callback will end
-        //       up using the connection string of the last Kafka resource that was added. The
-        //       client packages also have to work around this issue.
-        //
-        //       SEE: https://github.com/Xabaril/AspNetCore.Diagnostics.HealthChecks/issues/2298
+        // DI must own the check so its producer is reused and disposed with the AppHost.
+        // Key it per resource to avoid sharing the last resource's connection string:
+        // https://github.com/Xabaril/AspNetCore.Diagnostics.HealthChecks/issues/2298
+        builder.Services.AddKeyedSingleton<KafkaHealthCheck>(healthCheckKey, (sp, _) =>
+        {
+            var options = new KafkaHealthCheckOptions();
+            options.Configuration = new ProducerConfig();
+            options.Configuration.BootstrapServers = connectionString ?? throw new InvalidOperationException("Connection string is unavailable");
+            return new KafkaHealthCheck(options);
+        });
+
         var healthCheckRegistration = new HealthCheckRegistration(
             healthCheckKey,
-            sp =>
-            {
-                var options = new KafkaHealthCheckOptions();
-                options.Configuration = new ProducerConfig();
-                options.Configuration.BootstrapServers = connectionString ?? throw new InvalidOperationException("Connection string is unavailable");
-                return new KafkaHealthCheck(options);
-            },
+            sp => sp.GetRequiredKeyedService<KafkaHealthCheck>(healthCheckKey),
             failureStatus: default,
             tags: default);
         builder.Services.AddHealthChecks().Add(healthCheckRegistration);
@@ -75,6 +75,7 @@ public static class KafkaBuilderExtensions
             .WithEndpoint(targetPort: KafkaInternalBrokerPort, name: KafkaServerResource.InternalEndpointName)
             .WithImage(KafkaContainerImageTags.Image, KafkaContainerImageTags.Tag)
             .WithImageRegistry(KafkaContainerImageTags.Registry)
+            .WithIconName("MailMultiple")
             .WithEnvironment(context => ConfigureKafkaContainer(context, kafka))
             .WithHealthCheck(healthCheckKey);
     }
@@ -89,7 +90,8 @@ public static class KafkaBuilderExtensions
     /// <param name="configureContainer">Configuration callback for KafkaUI container resource.</param>
     /// <param name="containerName">The name of the container (Optional).</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{KafkaServerResource}"/>.</returns>
-    [AspireExport("withKafkaUI", Description = "Adds a Kafka UI container to manage the Kafka resource")]
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport(RunSyncOnBackgroundThread = true)]
     public static IResourceBuilder<KafkaServerResource> WithKafkaUI(this IResourceBuilder<KafkaServerResource> builder, Action<IResourceBuilder<KafkaUIContainerResource>>? configureContainer = null, string? containerName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -108,6 +110,7 @@ public static class KafkaBuilderExtensions
             var kafkaUiBuilder = builder.ApplicationBuilder.AddResource(kafkaUi)
                 .WithImage(KafkaContainerImageTags.KafkaUiImage, KafkaContainerImageTags.KafkaUiTag)
                 .WithImageRegistry(KafkaContainerImageTags.Registry)
+                .WithIconName("WindowDatabase")
                 .WithHttpEndpoint(targetPort: KafkaUIPort)
                 .ExcludeFromManifest();
 
@@ -153,7 +156,7 @@ public static class KafkaBuilderExtensions
     /// <param name="builder">The resource builder for KafkaUI.</param>
     /// <param name="port">The port to bind on the host. If <see langword="null"/> is used random port will be assigned.</param>
     /// <returns>The resource builder for KafkaUI.</returns>
-    [AspireExport("withHostPort", Description = "Sets the host port for the Kafka UI container")]
+    [AspireExport]
     public static IResourceBuilder<KafkaUIContainerResource> WithHostPort(this IResourceBuilder<KafkaUIContainerResource> builder, int? port)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -171,7 +174,8 @@ public static class KafkaBuilderExtensions
     /// <param name="name">The name of the volume. Defaults to an auto-generated name based on the application and resource names.</param>
     /// <param name="isReadOnly">A flag that indicates if this is a read-only volume.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [AspireExport("withDataVolume", Description = "Adds a data volume to the Kafka container")]
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<KafkaServerResource> WithDataVolume(this IResourceBuilder<KafkaServerResource> builder, string? name = null, bool isReadOnly = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -188,7 +192,8 @@ public static class KafkaBuilderExtensions
     /// <param name="source">The source directory on the host to mount into the container.</param>
     /// <param name="isReadOnly">A flag that indicates if this is a read-only mount.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
-    [AspireExport("withDataBindMount", Description = "Adds a data bind mount to the Kafka container")]
+    /// <ats-returns>The resource builder.</ats-returns>
+    [AspireExport]
     public static IResourceBuilder<KafkaServerResource> WithDataBindMount(this IResourceBuilder<KafkaServerResource> builder, string source, bool isReadOnly = false)
     {
         ArgumentNullException.ThrowIfNull(builder);

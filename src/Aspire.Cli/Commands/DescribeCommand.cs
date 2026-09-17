@@ -4,13 +4,14 @@
 using System.CommandLine;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Aspire.Cli.Backchannel;
-using Aspire.Cli.Configuration;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Resources;
-using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
+using Aspire.Dashboard.Utils;
+using Aspire.Shared;
 using Aspire.Shared.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
@@ -20,6 +21,7 @@ namespace Aspire.Cli.Commands;
 /// <summary>
 /// Output format for resources command (array wrapper).
 /// </summary>
+// `aspire describe --format json` uses this wrapper; keep docs/specs/cli-output-formats.md in sync when changing it.
 internal sealed class ResourcesOutput
 {
     public required ResourceJson[] Resources { get; init; }
@@ -29,10 +31,13 @@ internal sealed class ResourcesOutput
 [JsonSerializable(typeof(ResourceJson))]
 [JsonSerializable(typeof(ResourceUrlJson))]
 [JsonSerializable(typeof(ResourceVolumeJson))]
+[JsonSerializable(typeof(JsonNode))]
+[JsonSerializable(typeof(Dictionary<string, JsonNode?>))]
 [JsonSerializable(typeof(Dictionary<string, string?>))]
 [JsonSerializable(typeof(Dictionary<string, ResourceHealthReportJson>))]
 [JsonSerializable(typeof(ResourceRelationshipJson))]
 [JsonSerializable(typeof(Dictionary<string, ResourceCommandJson>))]
+[JsonSerializable(typeof(ResourceCommandArgumentJson[]))]
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
@@ -69,9 +74,9 @@ internal sealed class DescribeCommand : BaseCommand
 {
     internal override HelpGroup HelpGroup => HelpGroup.Monitoring;
 
-    private readonly IInteractionService _interactionService;
     private readonly AppHostConnectionResolver _connectionResolver;
     private readonly ResourceColorMap _resourceColorMap;
+    private readonly ILogger<ResourceSnapshotWatcher> _resourceSnapshotWatcherLogger;
 
     private static readonly Argument<string?> s_resourceArgument = new("resource")
     {
@@ -87,30 +92,36 @@ internal sealed class DescribeCommand : BaseCommand
     {
         Description = DescribeCommandStrings.JsonOptionDescription
     };
+    private static readonly Option<bool> s_includeHiddenOption = new("--include-hidden")
+    {
+        Description = DescribeCommandStrings.IncludeHiddenOptionDescription
+    };
+    private static readonly Option<bool> s_includeDisabledCommandsOption = new("--include-disabled-commands")
+    {
+        Hidden = true
+    };
 
     public DescribeCommand(
-        IInteractionService interactionService,
-        IAuxiliaryBackchannelMonitor backchannelMonitor,
-        IFeatures features,
-        ICliUpdateNotifier updateNotifier,
-        CliExecutionContext executionContext,
-        AspireCliTelemetry telemetry,
+        AppHostConnectionResolver connectionResolver,
         ResourceColorMap resourceColorMap,
-        ILogger<DescribeCommand> logger)
-        : base("describe", DescribeCommandStrings.Description, features, updateNotifier, executionContext, interactionService, telemetry)
+        ILogger<ResourceSnapshotWatcher> resourceSnapshotWatcherLogger,
+        CommonCommandServices services)
+        : base("describe", DescribeCommandStrings.Description, services)
     {
         Aliases.Add("resources");
-        _interactionService = interactionService;
         _resourceColorMap = resourceColorMap;
-        _connectionResolver = new AppHostConnectionResolver(backchannelMonitor, interactionService, executionContext, logger);
+        _connectionResolver = connectionResolver;
+        _resourceSnapshotWatcherLogger = resourceSnapshotWatcherLogger;
 
         Arguments.Add(s_resourceArgument);
         Options.Add(s_appHostOption);
         Options.Add(s_followOption);
         Options.Add(s_formatOption);
+        Options.Add(s_includeHiddenOption);
+        Options.Add(s_includeDisabledCommandsOption);
     }
 
-    protected override async Task<int> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
+    protected override async Task<CommandResult> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
     {
         using var activity = Telemetry.StartDiagnosticActivity(Name);
 
@@ -118,6 +129,8 @@ internal sealed class DescribeCommand : BaseCommand
         var passedAppHostProjectFile = parseResult.GetValue(s_appHostOption);
         var follow = parseResult.GetValue(s_followOption);
         var format = parseResult.GetValue(s_formatOption);
+        var includeHidden = parseResult.GetValue(s_includeHiddenOption);
+        var includeDisabledCommands = parseResult.GetValue(s_includeDisabledCommandsOption);
 
         var result = await _connectionResolver.ResolveConnectionAsync(
             passedAppHostProjectFile,
@@ -128,38 +141,63 @@ internal sealed class DescribeCommand : BaseCommand
 
         if (!result.Success)
         {
-            // No running AppHosts is not an error - similar to Unix 'ps' returning empty
-            _interactionService.DisplayMessage(KnownEmojis.Information, result.ErrorMessage);
-            return ExitCodeConstants.Success;
+            return CommandResult.FromExitCode(AppHostConnectionResultHandler.DisplayFailureAsInformation(result, InteractionService));
         }
 
         var connection = result.Connection!;
 
-        // Get dashboard URL and resource snapshots in parallel before
-        // dispatching to the snapshot or watch path.
+        // Get dashboard URL while the watcher loads initial snapshots.
+        // When a specific resource is requested, always include hidden resources
+        // so the user can describe any resource by name.
+        var effectiveIncludeHidden = includeHidden || resourceName is not null;
         var dashboardUrlsTask = connection.GetDashboardUrlsAsync(cancellationToken);
-        var snapshotsTask = connection.GetResourceSnapshotsAsync(cancellationToken);
+        using var resourceWatcher = new ResourceSnapshotWatcher(
+            connection,
+            _resourceSnapshotWatcherLogger,
+            effectiveIncludeHidden,
+            bufferUpdates: follow);
+        await resourceWatcher.WaitForInitialLoadAsync(cancellationToken).ConfigureAwait(false);
 
-        await Task.WhenAll(dashboardUrlsTask, snapshotsTask).ConfigureAwait(false);
-
-        var dashboardBaseUrl = (await dashboardUrlsTask.ConfigureAwait(false))?.BaseUrlWithLoginToken;
-        var snapshots = await snapshotsTask.ConfigureAwait(false);
+        var dashboardBaseUrl = TelemetryCommandHelpers.ExtractDashboardBaseUrl((await dashboardUrlsTask.ConfigureAwait(false))?.BaseUrlWithLoginToken);
 
         // Pre-resolve colors for all resource names so that assignment is
         // deterministic regardless of which resources are displayed.
-        _resourceColorMap.ResolveAll(snapshots.Select(s => ResourceSnapshotMapper.GetResourceName(s, snapshots)));
+        var allSnapshots = resourceWatcher.GetAllResources();
+        _resourceColorMap.ResolveAll(allSnapshots.Select(s => ResourceSnapshotMapper.GetResourceName(s, allSnapshots)));
 
         if (follow)
         {
-            return await ExecuteWatchAsync(connection, snapshots, dashboardBaseUrl, resourceName, format, cancellationToken);
+            try
+            {
+                return CommandResult.FromExitCode(await ExecuteWatchAsync(resourceWatcher, dashboardBaseUrl, resourceName, format, includeDisabledCommands, cancellationToken));
+            }
+            catch (OperationCanceledException ex) when (ex.CancellationToken == cancellationToken || cancellationToken.IsCancellationRequested)
+            {
+                return CommandResult.Success();
+            }
+            catch (Exception ex) when (AppHostFollowDisconnectHelpers.IsExpectedDisconnect(ex))
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return CommandResult.Success();
+                }
+
+                // Stopping or restarting the AppHost can tear down the JSON-RPC stream while
+                // describe --follow is active. Treat the lost watch as a normal end of stream
+                // rather than surfacing it as an unexpected CLI failure. Emit the status
+                // message on stderr so JSON output on stdout remains parseable.
+                AppHostFollowDisconnectHelpers.WriteStatusMessage(InteractionService, connection);
+
+                return CommandResult.Success();
+            }
         }
         else
         {
-            return ExecuteSnapshot(snapshots, dashboardBaseUrl, resourceName, format);
+            return CommandResult.FromExitCode(ExecuteSnapshot(resourceWatcher.GetResources().ToList(), dashboardBaseUrl, resourceName, format, includeDisabledCommands));
         }
     }
 
-    private int ExecuteSnapshot(IReadOnlyList<ResourceSnapshot> snapshots, string? dashboardBaseUrl, string? resourceName, OutputFormat format)
+    private int ExecuteSnapshot(IReadOnlyList<ResourceSnapshot> snapshots, string? dashboardBaseUrl, string? resourceName, OutputFormat format, bool includeDisabledCommands)
     {
         // Filter by resource name if specified
         if (resourceName is not null)
@@ -170,49 +208,40 @@ internal sealed class DescribeCommand : BaseCommand
         // Check if resource was not found
         if (resourceName is not null && snapshots.Count == 0)
         {
-            _interactionService.DisplayError(string.Format(CultureInfo.CurrentCulture, DescribeCommandStrings.ResourceNotFound, resourceName));
-            return ExitCodeConstants.FailedToFindProject;
+            InteractionService.DisplayError(string.Format(CultureInfo.CurrentCulture, DescribeCommandStrings.ResourceNotFound, resourceName));
+            return CliExitCodes.FailedToFindProject;
         }
 
-        var resourceList = ResourceSnapshotMapper.MapToResourceJsonList(snapshots, dashboardBaseUrl);
+        var resourceList = ResourceSnapshotMapper.MapToResourceJsonList(snapshots, dashboardBaseUrl, includeDisabledCommands: includeDisabledCommands);
 
         if (format == OutputFormat.Json)
         {
             var output = new ResourcesOutput { Resources = resourceList.ToArray() };
             var json = JsonSerializer.Serialize(output, ResourcesCommandJsonContext.RelaxedEscaping.ResourcesOutput);
             // Structured output always goes to stdout.
-            _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
+            InteractionService.DisplayRawText(json, ConsoleOutput.Standard);
         }
         else
         {
-            DisplayResourcesTable(snapshots);
+            DisplayResourcesTable(snapshots, dashboardBaseUrl);
         }
 
-        return ExitCodeConstants.Success;
+        return CliExitCodes.Success;
     }
 
-    private async Task<int> ExecuteWatchAsync(IAppHostAuxiliaryBackchannel connection, IReadOnlyList<ResourceSnapshot> initialSnapshots, string? dashboardBaseUrl, string? resourceName, OutputFormat format, CancellationToken cancellationToken)
+    private async Task<int> ExecuteWatchAsync(ResourceSnapshotWatcher resourceWatcher, string? dashboardBaseUrl, string? resourceName, OutputFormat format, bool includeDisabledCommands, CancellationToken cancellationToken)
     {
-        // Maintain a dictionary of the current state per resource for relationship resolution
-        // and display name deduplication. Keyed by snapshot.Name so each resource has exactly
-        // one entry representing its latest state.
-        var allResources = new Dictionary<string, ResourceSnapshot>(StringComparers.ResourceName);
-        foreach (var snapshot in initialSnapshots)
-        {
-            allResources[snapshot.Name] = snapshot;
-        }
-
         // Cache the last displayed content per resource to avoid duplicate output.
         // Values are either a string (JSON mode) or a ResourceDisplayState (non-JSON mode).
         var lastDisplayedContent = new Dictionary<string, object>(StringComparers.ResourceName);
 
-        // Stream resource snapshots
-        await foreach (var snapshot in connection.WatchResourceSnapshotsAsync(cancellationToken).ConfigureAwait(false))
+        void DisplaySnapshot(ResourceSnapshot snapshot, IReadOnlyList<ResourceSnapshot> currentSnapshots)
         {
-            // Update the dictionary with the latest state for this resource
-            allResources[snapshot.Name] = snapshot;
-
-            var currentSnapshots = allResources.Values.ToList();
+            // Skip hidden resources when not included
+            if (!resourceWatcher.IncludeHidden && ResourceSnapshotMapper.IsHiddenResource(snapshot))
+            {
+                return;
+            }
 
             // Filter by resource name if specified
             if (resourceName is not null)
@@ -220,13 +249,17 @@ internal sealed class DescribeCommand : BaseCommand
                 var resolved = ResourceSnapshotMapper.ResolveResources(resourceName, currentSnapshots);
                 if (!resolved.Any(r => string.Equals(r.Name, snapshot.Name, StringComparison.OrdinalIgnoreCase)))
                 {
-                    continue;
+                    return;
                 }
             }
 
             if (format == OutputFormat.Json)
             {
-                var resourceJson = ResourceSnapshotMapper.MapToResourceJson(snapshot, currentSnapshots, dashboardBaseUrl);
+                var resourceJson = ResourceSnapshotMapper.MapToResourceJson(
+                    snapshot,
+                    currentSnapshots,
+                    dashboardBaseUrl,
+                    includeDisabledCommands: includeDisabledCommands);
 
                 // NDJSON output - compact, one object per line for streaming
                 var json = JsonSerializer.Serialize(resourceJson, ResourcesCommandJsonContext.Ndjson.ResourceJson);
@@ -234,20 +267,19 @@ internal sealed class DescribeCommand : BaseCommand
                 // Skip if the JSON is identical to the last output for this resource
                 if (lastDisplayedContent.TryGetValue(snapshot.Name, out var lastValue) && lastValue is string lastJson && lastJson == json)
                 {
-                    continue;
+                    return;
                 }
 
                 lastDisplayedContent[snapshot.Name] = json;
-                _interactionService.DisplayRawText(json, ConsoleOutput.Standard);
+                InteractionService.DisplayRawText(json, ConsoleOutput.Standard);
             }
             else
             {
                 // Human-readable update - build display state and skip if unchanged
                 var displayState = BuildResourceDisplayState(snapshot, currentSnapshots);
-
                 if (lastDisplayedContent.TryGetValue(snapshot.Name, out var lastValue) && lastValue.Equals(displayState))
                 {
-                    continue;
+                    return;
                 }
 
                 lastDisplayedContent[snapshot.Name] = displayState;
@@ -255,14 +287,53 @@ internal sealed class DescribeCommand : BaseCommand
             }
         }
 
-        return ExitCodeConstants.Success;
-    }
+        var initialCapture = resourceWatcher.CaptureAllResources();
+        var currentSnapshots = initialCapture.Resources.ToList();
+        var snapshotIndexes = currentSnapshots
+            .Select((snapshot, index) => (snapshot.Name, index))
+            .ToDictionary(item => item.Name, item => item.index, StringComparers.ResourceName);
+        foreach (var snapshot in currentSnapshots)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DisplaySnapshot(snapshot, currentSnapshots);
+        }
 
-    private void DisplayResourcesTable(IReadOnlyList<ResourceSnapshot> snapshots)
+        await foreach (var batch in resourceWatcher.WatchResourceSnapshotBatchesAsync(initialCapture.UpdateSequence, cancellationToken).ConfigureAwait(false))
+        {
+            var changedSnapshots = new List<ResourceSnapshot>(batch.Snapshots.Count);
+            foreach (var snapshot in batch.Snapshots)
+            {
+                if (snapshotIndexes.TryGetValue(snapshot.Name, out var index))
+                {
+                    if (batch.IsResync && ReferenceEquals(currentSnapshots[index], snapshot))
+                    {
+                        continue;
+                    }
+
+                    currentSnapshots[index] = snapshot;
+                }
+                else
+                {
+                    snapshotIndexes.Add(snapshot.Name, currentSnapshots.Count);
+                    currentSnapshots.Add(snapshot);
+                }
+
+                changedSnapshots.Add(snapshot);
+            }
+
+            foreach (var snapshot in changedSnapshots)
+            {
+                DisplaySnapshot(snapshot, currentSnapshots);
+            }
+        }
+
+        return CliExitCodes.Success;
+    }
+    private void DisplayResourcesTable(IReadOnlyList<ResourceSnapshot> snapshots, string? dashboardBaseUrl)
     {
         if (snapshots.Count == 0)
         {
-            _interactionService.DisplayPlainText("No resources found.");
+            InteractionService.DisplayMessage(KnownEmojis.Information, "No resources found.");
             return;
         }
 
@@ -276,31 +347,43 @@ internal sealed class DescribeCommand : BaseCommand
         table.AddBoldColumn(DescribeCommandStrings.HeaderType);
         table.AddBoldColumn(DescribeCommandStrings.HeaderState);
         table.AddBoldColumn(DescribeCommandStrings.HeaderHealth);
-        table.AddBoldColumn(DescribeCommandStrings.HeaderEndpoints);
+        table.AddBoldColumn(DescribeCommandStrings.HeaderURLs);
 
         foreach (var (snapshot, displayName) in orderedItems)
         {
             var endpoints = snapshot.Urls.Length > 0
-                ? string.Join(", ", snapshot.Urls.Where(e => !e.IsInternal).Select(e => e.Url.EscapeMarkup()))
+                ? string.Join(", ", OrderUrls(snapshot.Urls.Where(e => !e.IsInternal))
+                    .Select(e => FormatEndpointUrl(e.Url, e.DisplayProperties?.DisplayName)))
                 : "-";
 
             var type = snapshot.ResourceType?.EscapeMarkup() ?? "-";
             var stateText = ColorState(snapshot.State);
             var healthText = ColorHealth(snapshot.HealthStatus?.EscapeMarkup() ?? "-");
 
-            table.AddRow(ColorResourceName(displayName, displayName.EscapeMarkup()), type, stateText, healthText, endpoints);
+            string nameMarkup;
+            if (!string.IsNullOrEmpty(dashboardBaseUrl))
+            {
+                var resourceUrl = DashboardUrls.CombineUrl(dashboardBaseUrl, DashboardUrls.ResourcesUrl(resource: snapshot.Name));
+                nameMarkup = MarkupHelpers.SafeLink(InteractionService, resourceUrl, displayName);
+            }
+            else
+            {
+                nameMarkup = displayName.EscapeMarkup();
+            }
+
+            table.AddRow(ColorResourceName(displayName, nameMarkup), type, stateText, healthText, endpoints);
         }
 
-        _interactionService.DisplayRenderable(table);
+        InteractionService.DisplayRenderable(table);
     }
 
     private static ResourceDisplayState BuildResourceDisplayState(ResourceSnapshot snapshot, IReadOnlyList<ResourceSnapshot> allResources)
     {
         var displayName = ResourceSnapshotMapper.GetResourceName(snapshot, allResources);
 
-        var endpoints = snapshot.Urls.Length > 0
-            ? string.Join(", ", snapshot.Urls.Where(e => !e.IsInternal).Select(e => e.Url))
-            : "";
+        var endpoints = OrderUrls(snapshot.Urls.Where(e => !e.IsInternal))
+            .Select(e => (e.Url, DisplayName: e.DisplayProperties?.DisplayName ?? ""))
+            .ToArray();
 
         return new ResourceDisplayState(displayName, snapshot.State, snapshot.HealthStatus, endpoints);
     }
@@ -309,9 +392,11 @@ internal sealed class DescribeCommand : BaseCommand
     {
         var stateText = ColorState(state.State);
         var healthText = !string.IsNullOrEmpty(state.HealthStatus) ? $" ({ColorHealth(state.HealthStatus.EscapeMarkup())})" : "";
-        var endpointsStr = !string.IsNullOrEmpty(state.Endpoints) ? $" - {state.Endpoints.EscapeMarkup()}" : "";
+        var endpointsStr = state.Endpoints.Length > 0
+            ? $" - {string.Join(", ", state.Endpoints.Select(e => FormatEndpointUrl(e.Url, e.DisplayName)))}"
+            : "";
 
-        _interactionService.DisplayMarkupLine($"{ColorResourceName(state.DisplayName, $"[[{state.DisplayName.EscapeMarkup()}]]")} {stateText}{healthText}{endpointsStr}");
+        InteractionService.DisplayMarkupLine($"{ColorResourceName(state.DisplayName, $"[[{state.DisplayName.EscapeMarkup()}]]")} {stateText}{healthText}{endpointsStr}");
     }
 
     private string ColorResourceName(string name, string displayMarkup) =>
@@ -335,6 +420,19 @@ internal sealed class DescribeCommand : BaseCommand
         };
     }
 
+    private static IOrderedEnumerable<ResourceSnapshotUrl> OrderUrls(IEnumerable<ResourceSnapshotUrl> urls) =>
+        urls.OrderByDescending(e => e.DisplayProperties?.SortOrder ?? 0)
+            .ThenByDescending(e => e.Url.StartsWith("https", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase);
+
+    private string FormatEndpointUrl(string url, string? displayName = null)
+    {
+        var text = !string.IsNullOrEmpty(displayName) ? displayName : url;
+        return KnownUnsupportedUrlSchemes.IsLinkableUrl(url)
+            ? MarkupHelpers.SafeLink(InteractionService, url, text)
+            : text.EscapeMarkup();
+    }
+
     private static string ColorHealth(string health) => health.ToUpperInvariant() switch
     {
         "HEALTHY" => $"[green]{health}[/]",
@@ -346,5 +444,23 @@ internal sealed class DescribeCommand : BaseCommand
     /// <summary>
     /// Represents the display state of a resource for deduplication during watch mode.
     /// </summary>
-    private sealed record ResourceDisplayState(string DisplayName, string? State, string? HealthStatus, string Endpoints);
+    private sealed class ResourceDisplayState(string displayName, string? state, string? healthStatus, (string Url, string DisplayName)[] endpoints) : IEquatable<ResourceDisplayState>
+    {
+        public string DisplayName { get; } = displayName;
+        public string? State { get; } = state;
+        public string? HealthStatus { get; } = healthStatus;
+        public (string Url, string DisplayName)[] Endpoints { get; } = endpoints;
+
+        public bool Equals(ResourceDisplayState? other) =>
+            other is not null &&
+            DisplayName == other.DisplayName &&
+            State == other.State &&
+            HealthStatus == other.HealthStatus &&
+            Endpoints.AsSpan().SequenceEqual(other.Endpoints);
+
+        public override bool Equals(object? obj) => Equals(obj as ResourceDisplayState);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(DisplayName, State, HealthStatus, Endpoints.Length);
+    }
 }

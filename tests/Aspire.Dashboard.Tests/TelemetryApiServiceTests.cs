@@ -1,11 +1,14 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Text;
 using Aspire.Dashboard.Api;
-using Aspire.Dashboard.Model;
 using Aspire.Dashboard.Otlp.Model;
 using Aspire.Dashboard.Otlp.Storage;
+using Aspire.Dashboard.Tests.Shared;
+using Aspire.Otlp.Serialization;
 using Google.Protobuf.Collections;
+using Microsoft.AspNetCore.InternalTesting;
 using OpenTelemetry.Proto.Logs.V1;
 using OpenTelemetry.Proto.Trace.V1;
 using Xunit;
@@ -20,38 +23,14 @@ public class TelemetryApiServiceTests
     [Fact]
     public async Task FollowSpansAsync_StreamsAllSpans()
     {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add 5 spans
-        for (var i = 1; i <= 5; i++)
-        {
-            repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-            {
-                new ResourceSpans
-                {
-                    Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                    ScopeSpans =
-                    {
-                        new ScopeSpans
-                        {
-                            Scope = CreateScope(),
-                            Spans =
-                            {
-                                CreateSpan(traceId: $"trace{i}", spanId: $"span{i}", startTime: s_testTime.AddMinutes(i), endTime: s_testTime.AddMinutes(i + 1))
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository(subscriptionMinExecuteInterval: TimeSpan.Zero);
+        var repository = repositoryContext.Repository;
+        await AddSpans(repository, count: 5);
 
         var service = CreateService(repository);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        // Act - stream spans
         var receivedItems = new List<string>();
-        await foreach (var item in service.FollowSpansAsync(null, null, null, cts.Token))
+        await foreach (var item in service.FollowSpansAsync(null, null, null, null).DefaultTimeout())
         {
             receivedItems.Add(item);
             if (receivedItems.Count >= 5)
@@ -60,45 +39,20 @@ public class TelemetryApiServiceTests
             }
         }
 
-        // Assert - should receive all 5 items
         Assert.Equal(5, receivedItems.Count);
     }
 
     [Fact]
     public async Task FollowLogsAsync_StreamsAllLogs()
     {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add 5 logs
-        for (var i = 1; i <= 5; i++)
-        {
-            repository.AddLogs(new AddContext(), new RepeatedField<ResourceLogs>
-            {
-                new ResourceLogs
-                {
-                    Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                    ScopeLogs =
-                    {
-                        new ScopeLogs
-                        {
-                            Scope = CreateScope("TestLogger"),
-                            LogRecords =
-                            {
-                                CreateLogRecord(time: s_testTime.AddMinutes(i), message: $"log{i}", severity: SeverityNumber.Info)
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository(subscriptionMinExecuteInterval: TimeSpan.Zero);
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, ["log1", "log2", "log3", "log4", "log5"]);
 
         var service = CreateService(repository);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        // Act - stream logs
         var receivedItems = new List<string>();
-        await foreach (var item in service.FollowLogsAsync(null, null, null, cts.Token))
+        await foreach (var item in service.FollowLogsAsync(null, null, null, null, default).DefaultTimeout())
         {
             receivedItems.Add(item);
             if (receivedItems.Count >= 5)
@@ -107,268 +61,742 @@ public class TelemetryApiServiceTests
             }
         }
 
-        // Assert - should receive all 5 items
         Assert.Equal(5, receivedItems.Count);
     }
 
-    [Fact]
-    public void GetSpans_HasErrorFalse_ExcludesErrorSpans()
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 1)]
+    [InlineData(null, 2)]
+    public async Task GetTraces_HasErrorFilter_ReturnsExpectedTraces(bool? hasError, int expectedCount)
     {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add spans - one with error, one without
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "trace1", spanId: "ok-span", startTime: s_testTime, endTime: s_testTime.AddMinutes(1), status: new Status { Code = Status.Types.StatusCode.Ok }),
-                            CreateSpan(traceId: "trace2", spanId: "error-span", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3), status: new Status { Code = Status.Types.StatusCode.Error })
-                        }
-                    }
-                }
-            }
-        });
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddTracesWithStatus(repository);
 
         var service = CreateService(repository);
 
-        // Act - get spans with hasError=false
-        var result = service.GetSpans(resourceNames: null, traceId: null, hasError: false, limit: null);
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: hasError, limit: null, cancellationToken: CancellationToken.None);
 
-        // Assert - should only return the non-error span
         Assert.NotNull(result);
-        Assert.Equal(1, result.ReturnedCount);
-        
-        // Serialize to check content
-        var json = System.Text.Json.JsonSerializer.Serialize(result.Data);
-        Assert.DoesNotContain("error-span", json);
-        Assert.Contains("ok-span", json);
-    }
-
-    [Fact]
-    public void GetSpans_HasErrorTrue_OnlyReturnsErrorSpans()
-    {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add spans - one with error, one without
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "trace1", spanId: "ok-span", startTime: s_testTime, endTime: s_testTime.AddMinutes(1), status: new Status { Code = Status.Types.StatusCode.Ok }),
-                            CreateSpan(traceId: "trace2", spanId: "error-span", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3), status: new Status { Code = Status.Types.StatusCode.Error })
-                        }
-                    }
-                }
-            }
-        });
-
-        var service = CreateService(repository);
-
-        // Act - get spans with hasError=true
-        var result = service.GetSpans(resourceNames: null, traceId: null, hasError: true, limit: null);
-
-        // Assert - should only return the error span
-        Assert.NotNull(result);
-        Assert.Equal(1, result.ReturnedCount);
-        
-        var json = System.Text.Json.JsonSerializer.Serialize(result.Data);
-        Assert.Contains("error-span", json);
-        Assert.DoesNotContain("ok-span", json);
-    }
-
-    [Fact]
-    public void GetTraces_HasErrorFalse_ExcludesTracesWithErrors()
-    {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add two traces - one with error span, one without
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "ok-trace", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1), status: new Status { Code = Status.Types.StatusCode.Ok })
-                        }
-                    }
-                }
-            }
-        });
-
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "error-trace", spanId: "span2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3), status: new Status { Code = Status.Types.StatusCode.Error })
-                        }
-                    }
-                }
-            }
-        });
-
-        var service = CreateService(repository);
-
-        // Act - get traces with hasError=false (no error, should exclude the error trace)
-        var result = service.GetTraces(resourceNames: null, hasError: false, limit: null);
-
-        // Assert - should only return 1 trace (the one without errors)
-        Assert.NotNull(result);
-        Assert.Equal(1, result.ReturnedCount);
-        
-        // Verify with null filter returns both
-        var allResult = service.GetTraces(resourceNames: null, hasError: null, limit: null);
-        Assert.NotNull(allResult);
-        Assert.Equal(2, allResult.ReturnedCount);
-    }
-
-    [Fact]
-    public void GetTraces_HasErrorTrue_OnlyReturnsTracesWithErrors()
-    {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add two traces - one with error span, one without
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "ok-trace", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1), status: new Status { Code = Status.Types.StatusCode.Ok })
-                        }
-                    }
-                }
-            }
-        });
-
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "error-trace", spanId: "span2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3), status: new Status { Code = Status.Types.StatusCode.Error })
-                        }
-                    }
-                }
-            }
-        });
-
-        var service = CreateService(repository);
-
-        // Act - get traces with hasError=true (error only)
-        var result = service.GetTraces(resourceNames: null, hasError: true, limit: null);
-
-        // Assert - should only return 1 trace (the one with errors)
-        Assert.NotNull(result);
-        Assert.Equal(1, result.ReturnedCount);
-        
-        // Verify with null filter returns both
-        var allResult = service.GetTraces(resourceNames: null, hasError: null, limit: null);
-        Assert.NotNull(allResult);
-        Assert.Equal(2, allResult.ReturnedCount);
+        Assert.Equal(expectedCount, result.ReturnedCount);
     }
 
     [Fact]
     public async Task FollowSpansAsync_WithInvalidResourceName_ReturnsNoSpans()
     {
-        // Arrange
-        var repository = CreateRepository();
-
-        // Add spans for service1
-        repository.AddTraces(new AddContext(), new RepeatedField<ResourceSpans>
-        {
-            new ResourceSpans
-            {
-                Resource = CreateResource(name: "service1", instanceId: "inst1"),
-                ScopeSpans =
-                {
-                    new ScopeSpans
-                    {
-                        Scope = CreateScope(),
-                        Spans =
-                        {
-                            CreateSpan(traceId: "trace1", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1))
-                        }
-                    }
-                }
-            }
-        });
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpans(repository, count: 1);
 
         var service = CreateService(repository);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
 
-        // Act - stream spans for a non-existent resource
         var receivedItems = new List<string>();
         try
         {
-            await foreach (var item in service.FollowSpansAsync(["nonexistent-service"], null, null, cts.Token))
+            await foreach (var item in service.FollowSpansAsync(["nonexistent-service"], null, null, null).DefaultTimeout())
             {
                 receivedItems.Add(item);
             }
         }
-        catch (OperationCanceledException)
+        catch (TimeoutException)
         {
-            // Expected - timeout
         }
 
-        // Assert - should receive NO items because the resource doesn't exist
         Assert.Empty(receivedItems);
     }
 
     [Fact]
     public async Task FollowLogsAsync_WithInvalidResourceName_ReturnsNoLogs()
     {
-        // Arrange
-        var repository = CreateRepository();
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, ["log1"]);
 
-        // Add logs for service1
-        repository.AddLogs(new AddContext(), new RepeatedField<ResourceLogs>
+        var service = CreateService(repository);
+
+        var receivedItems = new List<string>();
+        try
+        {
+            await foreach (var item in service.FollowLogsAsync(["nonexistent-service"], null, null, null, default).DefaultTimeout())
+            {
+                receivedItems.Add(item);
+            }
+        }
+        catch (TimeoutException)
+        {
+        }
+
+        Assert.Empty(receivedItems);
+    }
+
+    [Theory]
+    [InlineData("747261636531", true)] // full hex trace ID
+    [InlineData("7472616", true)] // shortened (7 char) prefix
+    [InlineData("747261", false)] // too short
+    [InlineData("nonexistent", false)]
+    public async Task GetTrace_VariousTraceIds_ReturnsExpectedResult(string lookupId, bool expectFound)
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        var traceId = Encoding.UTF8.GetString(Convert.FromHexString("747261636531"));
+
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: traceId, spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1))
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = service.GetTrace(lookupId);
+
+        if (expectFound)
+        {
+            Assert.NotNull(result);
+            Assert.Equal(1, result.ReturnedCount);
+        }
+        else
+        {
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public async Task FollowSpansAsync_WithTraceIdFilter_MatchesShortenedIds()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        var traceId = Encoding.UTF8.GetString(Convert.FromHexString("747261636531"));
+
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: traceId, spanId: "matching-span", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)),
+            CreateSpan(traceId: "other-trace", spanId: "other-span", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3))
+        ]);
+
+        var service = CreateService(repository);
+
+        var receivedItems = new List<string>();
+        await foreach (var streamedItem in service.FollowSpansAsync(null, "7472616", null, null).DefaultTimeout())
+        {
+            receivedItems.Add(streamedItem);
+            break;
+        }
+
+        var receivedItem = Assert.Single(receivedItems);
+        Assert.Contains("matching-span", receivedItem);
+        Assert.DoesNotContain("other-span", receivedItem);
+    }
+
+    [Fact]
+    public async Task GetTrace_ReturnsAllSpansForTrace()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        var traceId = Encoding.UTF8.GetString(Convert.FromHexString("747261636531"));
+
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: traceId, spanId: "short-span", startTime: s_testTime, endTime: s_testTime.AddMilliseconds(49)),
+            CreateSpan(traceId: traceId, spanId: "long-span", startTime: s_testTime.AddSeconds(1), endTime: s_testTime.AddSeconds(1).AddMilliseconds(50))
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = service.GetTrace("747261636531");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.TotalCount);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetTraces_WithLimit_ReturnsMostRecentTraces()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpans(repository, count: 3, startMinuteSpacing: 10);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: 2, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.TotalCount);
+        Assert.Equal(2, result.ReturnedCount);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Data);
+        Assert.DoesNotContain("span1", json);
+        Assert.Contains("span2", json);
+        Assert.Contains("span3", json);
+    }
+
+    [Fact]
+    public async Task GetTraces_WithLimitAndDurationSearchFilter_ReturnsMostRecentMatchingTraces()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpans(repository, count: 3, startMinuteSpacing: 10);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: 2, cancellationToken: CancellationToken.None, search: "duration:>=50");
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.TotalCount);
+        Assert.Equal(2, result.ReturnedCount);
+
+        var spanIds = GetAllSpans(result).Select(s => DecodeSpanId(s.SpanId)).ToList();
+        Assert.Equal(2, spanIds.Count);
+        Assert.Contains("span2", spanIds);
+        Assert.Contains("span3", spanIds);
+        Assert.DoesNotContain("span1", spanIds);
+    }
+
+    [Fact]
+    public async Task GetTraces_WithDurationSearchFilter_FiltersShortSpans()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "short-trace", spanId: "short-trace-span", startTime: s_testTime, endTime: s_testTime.AddMilliseconds(49))
+        ]);
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "mixed-trace", spanId: "mixed-short-span", startTime: s_testTime.AddSeconds(1), endTime: s_testTime.AddSeconds(1).AddMilliseconds(49)),
+            CreateSpan(traceId: "mixed-trace", spanId: "mixed-long-span", startTime: s_testTime.AddSeconds(2), endTime: s_testTime.AddSeconds(2).AddMilliseconds(50))
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "duration:>=50");
+
+        Assert.NotNull(result);
+        // The trace with short-trace-span (49ms) is excluded because no span matches the filter.
+        // The mixed-trace is included because mixed-long-span (50ms) matches, and all its spans are returned.
+        Assert.Equal(1, result.TotalCount);
+        Assert.Equal(1, result.ReturnedCount);
+
+        var spans = GetAllSpans(result);
+        Assert.Equal(2, spans.Count);
+        Assert.Contains(spans, s => DecodeSpanId(s.SpanId) == "mixed-short-span");
+        Assert.Contains(spans, s => DecodeSpanId(s.SpanId) == "mixed-long-span");
+    }
+
+    [Fact]
+    public async Task GetTraces_WithHasErrorAndDurationSearchFilter_ReturnsAllSpansFromMatchingTraces()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpansToRepository(repository, [
+            CreateSpan(
+                traceId: "mixed-trace",
+                spanId: "short-error-span",
+                startTime: s_testTime,
+                endTime: s_testTime.AddMilliseconds(49),
+                status: new Status { Code = Status.Types.StatusCode.Error }),
+            CreateSpan(
+                traceId: "mixed-trace",
+                spanId: "long-ok-span",
+                startTime: s_testTime.AddSeconds(1),
+                endTime: s_testTime.AddSeconds(1).AddMilliseconds(50),
+                status: new Status { Code = Status.Types.StatusCode.Ok })
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: true, limit: null, cancellationToken: CancellationToken.None, search: "duration:>=50");
+
+        Assert.NotNull(result);
+        // The trace matches hasError because it has an error span.
+        // The duration filter selects the trace because long-ok-span (50ms) matches.
+        // All spans from the matching trace are returned.
+        Assert.Equal(1, result.TotalCount);
+        Assert.Equal(1, result.ReturnedCount);
+
+        var spans = GetAllSpans(result);
+        Assert.Equal(2, spans.Count);
+        Assert.Contains(spans, s => DecodeSpanId(s.SpanId) == "short-error-span");
+        Assert.Contains(spans, s => DecodeSpanId(s.SpanId) == "long-ok-span");
+    }
+
+    [Fact]
+    public async Task GetLogs_WithLimit_ReturnsMostRecentLogs()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, ["old-log", "mid-log", "new-log"]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: 2, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.TotalCount);
+        Assert.Equal(2, result.ReturnedCount);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Data);
+        Assert.DoesNotContain("old-log", json);
+        Assert.Contains("mid-log", json);
+        Assert.Contains("new-log", json);
+    }
+
+    [Fact]
+    public async Task GetLogs_LargeLimit_ReturnsAllLogs()
+    {
+        const int totalLogs = 20_000;
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository(maxLogCount: totalLogs);
+        var repository = repositoryContext.Repository;
+
+        var logRecords = new RepeatedField<LogRecord>();
+        for (var i = 0; i < totalLogs; i++)
+        {
+            logRecords.Add(CreateLogRecord(time: s_testTime.AddMilliseconds(i), message: $"log{i}", severity: SeverityNumber.Info));
+        }
+
+        await AddLogsToRepository(repository, logRecords);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: 100_000, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(totalLogs, result.TotalCount);
+        Assert.Equal(totalLogs, result.ReturnedCount);
+    }
+
+    [Theory]
+    [InlineData("Connection", 2)]
+    [InlineData("nonexistent", 0)]
+    public async Task GetLogs_WithSearch_FiltersLogsByMessage(string search, int expectedCount)
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, ["Connection established", "Request received", "Connection closed"]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: search);
+
+        Assert.NotNull(result);
+        Assert.Equal(expectedCount, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetLogs_WithSearch_IsCaseInsensitive()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, ["UPPERCASE warning detected"]);
+        await AddLogs(repository, ["Normal log"]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: "uppercase warning");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetLogs_WithSearch_MatchesAttributes()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogsToRepository(repository, [
+            CreateLogRecord(time: s_testTime, message: "log1", severity: SeverityNumber.Info,
+                attributes: [new KeyValuePair<string, string>("http.url", "/api/products")]),
+            CreateLogRecord(time: s_testTime.AddMinutes(1), message: "log2", severity: SeverityNumber.Info,
+                attributes: [new KeyValuePair<string, string>("http.url", "/api/orders")])
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: "products");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Theory]
+    [InlineData("span1", 1)]
+    [InlineData("nonexistent-xyz", 0)]
+    public async Task GetTraces_WithSearch_FiltersTraces(string search, int expectedCount)
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        // Each trace needs a separate AddTraces call to get distinct trace IDs in the repository
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace1", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1))
+        ]);
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace2", spanId: "span2", startTime: s_testTime.AddMinutes(10), endTime: s_testTime.AddMinutes(11))
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: search);
+
+        Assert.NotNull(result);
+        Assert.Equal(expectedCount, result.ReturnedCount);
+
+        if (expectedCount > 0)
+        {
+            var allResult = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+            Assert.NotNull(allResult);
+            Assert.Equal(2, allResult.ReturnedCount);
+        }
+    }
+
+    [Fact]
+    public async Task GetSpans_WithAttributeFilter_FiltersSpans()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace1", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1),
+                attributes: [new KeyValuePair<string, string>("http.method", "GET")]),
+            CreateSpan(traceId: "trace1", spanId: "span2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3),
+                attributes: [new KeyValuePair<string, string>("http.method", "POST")])
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "@http.method:GET");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+
+        var spans = GetAllSpans(result);
+        Assert.Single(spans);
+        Assert.Equal("span1", DecodeSpanId(spans[0].SpanId));
+    }
+
+    [Fact]
+    public async Task GetTraces_WithAttributeFilter_FiltersTraces()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace1", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1),
+                attributes: [new KeyValuePair<string, string>("http.method", "GET")])
+        ]);
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace2", spanId: "span2", startTime: s_testTime.AddMinutes(10), endTime: s_testTime.AddMinutes(11),
+                attributes: [new KeyValuePair<string, string>("http.method", "POST")])
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetTracesAsync(resourceNames: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "@http.method:POST");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+
+        var spanIds = GetAllSpans(result).Select(s => DecodeSpanId(s.SpanId)).ToList();
+        Assert.Contains("span2", spanIds);
+        Assert.DoesNotContain("span1", spanIds);
+    }
+
+    [Fact]
+    public async Task GetLogs_WithAttributeFilter_FiltersLogs()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogsToRepository(repository, [
+            CreateLogRecord(time: s_testTime, message: "log1", severity: SeverityNumber.Info,
+                attributes: [new KeyValuePair<string, string>("http.method", "GET")]),
+            CreateLogRecord(time: s_testTime.AddMinutes(1), message: "log2", severity: SeverityNumber.Info,
+                attributes: [new KeyValuePair<string, string>("http.method", "POST")])
+        ]);
+
+        var service = CreateService(repository);
+
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: "@http.method:GET");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithDurationRangeFilter_ReturnsSpansInRange()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace1", spanId: "short-span", startTime: s_testTime, endTime: s_testTime.AddMilliseconds(30)),
+            CreateSpan(traceId: "trace1", spanId: "mid-span", startTime: s_testTime.AddSeconds(1), endTime: s_testTime.AddSeconds(1).AddMilliseconds(75)),
+            CreateSpan(traceId: "trace1", spanId: "long-span", startTime: s_testTime.AddSeconds(2), endTime: s_testTime.AddSeconds(2).AddMilliseconds(200))
+        ]);
+
+        var service = CreateService(repository);
+
+        // Filter for spans with duration > 50ms AND < 100ms (only mid-span at 75ms matches)
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "duration:>50 duration:<100");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+
+        var spans = GetAllSpans(result);
+        Assert.Single(spans);
+        Assert.Equal("mid-span", DecodeSpanId(spans[0].SpanId));
+    }
+
+    [Fact]
+    public async Task GetLogs_WithUrlSearch_MatchesExactScheme()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddLogs(repository, [
+            "Request to http://www.contoso.com/api completed",
+            "Request to https://www.contoso.com/api completed",
+            "No URL in this message"
+        ]);
+
+        var service = CreateService(repository);
+
+        // The entire URL should be treated as a text fragment, not parsed as a qualifier
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: "http://www.contoso.com");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampGreaterThan_FiltersCorrectly()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // Filter for spans after s_testTime+1.5min (should return spans at +2min and +3min)
+        var cutoff = s_testTime.AddMinutes(1).AddSeconds(30).ToString("O");
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: $"timestamp:>{cutoff}");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampLessThan_FiltersCorrectly()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // Filter for spans before s_testTime+2.5min (should return spans at +1min and +2min)
+        var cutoff = s_testTime.AddMinutes(2).AddSeconds(30).ToString("O");
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: $"timestamp:<{cutoff}");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampGreaterThanOrEqual_FiltersCorrectly()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // Filter for spans at or after exactly s_testTime+2min (should return spans at +2min and +3min)
+        var cutoff = s_testTime.AddMinutes(2).ToString("O");
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: $"timestamp:>={cutoff}");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetLogs_WithTimestampGreaterThan_FiltersCorrectly()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Logs at s_testTime, +1min, +2min
+        await AddLogs(repository, ["log1", "log2", "log3"]);
+
+        var service = CreateService(repository);
+
+        // Filter for logs after s_testTime+0.5min (should return logs at +1min and +2min)
+        var cutoff = s_testTime.AddSeconds(30).ToString("O");
+        var result = await service.GetLogsAsync(resourceNames: null, traceId: null, severity: null, limit: null, cancellationToken: CancellationToken.None, search: $"timestamp:>{cutoff}");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampInvalidDate_ReturnsNoResults()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // Invalid date string should not match anything
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "timestamp:>not-a-date");
+
+        Assert.NotNull(result);
+        Assert.Equal(0, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampUtcSuffix_TreatedAsUtc()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min (s_testTime is 1970-01-01T00:00:00Z)
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // A timestamp ending in Z is UTC and should not be adjusted.
+        // s_testTime+1.5min = 1970-01-01T00:01:30Z — should match spans at +2min and +3min
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "timestamp:>1970-01-01T00:01:30Z");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampNoTimezone_TreatedAsLocalTime()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min (s_testTime is 1970-01-01T00:00:00Z)
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // A timestamp without Z or offset is treated as local time and converted to UTC.
+        // Compute what local time corresponds to s_testTime+1.5min UTC so the filter matches the same spans.
+        var utcCutoff = s_testTime.AddMinutes(1).AddSeconds(30);
+        var localCutoff = utcCutoff.ToLocalTime();
+        var localString = localCutoff.ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: $"timestamp:>{localString}");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampOffset_AdjustedToUtc()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Spans at s_testTime+1min, +2min, +3min (s_testTime is 1970-01-01T00:00:00Z)
+        await AddSpans(repository, count: 3);
+
+        var service = CreateService(repository);
+
+        // A timestamp with an explicit offset is adjusted to UTC.
+        // 1970-01-01T01:01:30+01:00 = 1970-01-01T00:01:30Z — should match spans at +2min and +3min
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "timestamp:>1970-01-01T01:01:30+01:00");
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithTimestampDateOnly_FiltersCorrectly()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        // Create spans on two different days: 1970-01-01 and 1970-01-02
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace1", spanId: "span1", startTime: new DateTime(1970, 1, 1, 12, 0, 0, DateTimeKind.Utc), endTime: new DateTime(1970, 1, 1, 12, 1, 0, DateTimeKind.Utc))
+        ]);
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "trace2", spanId: "span2", startTime: new DateTime(1970, 1, 2, 12, 0, 0, DateTimeKind.Utc), endTime: new DateTime(1970, 1, 2, 12, 1, 0, DateTimeKind.Utc))
+        ]);
+
+        var service = CreateService(repository);
+
+        // A date-only string (no time component) should be parsed as midnight UTC and filter correctly.
+        // "1970-01-02" = midnight 1970-01-02 UTC — only the span on 1970-01-02 has a start time >= that.
+        var result = await service.GetSpansAsync(resourceNames: null, traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None, search: "timestamp:>=1970-01-02");
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    /// <summary>
+    /// Adds spans with sequential trace/span IDs to the repository. Each span is added in a separate
+    /// AddTraces call so that it gets its own trace entry.
+    /// </summary>
+    private static async Task AddSpans(SqliteTelemetryRepository repository, int count, int startMinuteSpacing = 1)
+    {
+        for (var i = 1; i <= count; i++)
+        {
+            await AddSpansToRepository(repository, [
+                CreateSpan(traceId: $"trace{i}", spanId: $"span{i}", startTime: s_testTime.AddMinutes(i * startMinuteSpacing), endTime: s_testTime.AddMinutes(i * startMinuteSpacing + 1))
+            ]);
+        }
+    }
+
+    /// <summary>
+    /// Adds a batch of spans (as raw Span objects) to the repository under a single resource.
+    /// </summary>
+    private static async Task AddSpansToRepository(SqliteTelemetryRepository repository, IEnumerable<Span> spans)
+    {
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "service1", instanceId: "inst1"),
+                ScopeSpans =
+                {
+                    new ScopeSpans
+                    {
+                        Scope = CreateScope(),
+                        Spans = { spans }
+                    }
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Adds two traces (separate trace IDs) with OK and Error status for hasError filter tests.
+    /// </summary>
+    private static async Task AddTracesWithStatus(SqliteTelemetryRepository repository)
+    {
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "ok-trace", spanId: "span1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1), status: new Status { Code = Status.Types.StatusCode.Ok })
+        ]);
+        await AddSpansToRepository(repository, [
+            CreateSpan(traceId: "error-trace", spanId: "span2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3), status: new Status { Code = Status.Types.StatusCode.Error })
+        ]);
+    }
+
+    /// <summary>
+    /// Adds log entries with the specified messages to the repository.
+    /// </summary>
+    private static async Task AddLogs(SqliteTelemetryRepository repository, string[] messages, SeverityNumber severity = SeverityNumber.Info)
+    {
+        var logRecords = new RepeatedField<LogRecord>();
+        for (var i = 0; i < messages.Length; i++)
+        {
+            logRecords.Add(CreateLogRecord(time: s_testTime.AddMinutes(i), message: messages[i], severity: severity));
+        }
+
+        await AddLogsToRepository(repository, logRecords);
+    }
+
+    /// <summary>
+    /// Adds a batch of raw LogRecord objects to the repository under a single resource.
+    /// </summary>
+    private static async Task AddLogsToRepository(SqliteTelemetryRepository repository, RepeatedField<LogRecord> logRecords)
+    {
+        await repository.AddLogsAsync(new AddContext(), new RepeatedField<ResourceLogs>
         {
             new ResourceLogs
             {
@@ -378,45 +806,283 @@ public class TelemetryApiServiceTests
                     new ScopeLogs
                     {
                         Scope = CreateScope("TestLogger"),
-                        LogRecords =
-                        {
-                            CreateLogRecord(time: s_testTime, message: "log1", severity: SeverityNumber.Info)
-                        }
+                        LogRecords = { logRecords }
                     }
                 }
             }
         });
-
-        var service = CreateService(repository);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
-        // Act - stream logs for a non-existent resource
-        var receivedItems = new List<string>();
-        try
-        {
-            await foreach (var item in service.FollowLogsAsync(["nonexistent-service"], null, null, cts.Token))
-            {
-                receivedItems.Add(item);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected - timeout
-        }
-
-        // Assert - should receive NO items because the resource doesn't exist
-        Assert.Empty(receivedItems);
     }
 
-    /// <summary>
-    /// Creates a TelemetryApiService instance for testing with optional custom dependencies.
-    /// </summary>
-    private static TelemetryApiService CreateService(
-        TelemetryRepository? repository = null,
-        IOutgoingPeerResolver[]? peerResolvers = null)
+    private static TelemetryApiService CreateService(SqliteTelemetryRepository repository)
     {
-        return new TelemetryApiService(
-            repository ?? CreateRepository(),
-            peerResolvers ?? []);
+        return new TelemetryApiService(repository);
+    }
+
+    private static List<OtlpSpanJson> GetAllSpans(TelemetryApiResponse result)
+    {
+        // These tests care about which OTLP spans are returned, not the complete JSON
+        // serialization shape. Assert over the structured response model so a formatting
+        // change can't hide a filtering regression or create snapshot churn.
+        return result.Data?.ResourceSpans?
+            .SelectMany(rs => rs.ScopeSpans ?? [])
+            .SelectMany(ss => ss.Spans ?? [])
+            .ToList() ?? [];
+    }
+
+    [Fact]
+    public async Task FollowSpansAsync_WaitsForResourceToAppear_ThenStreams()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        var service = CreateService(repository);
+
+        // Start enumerating - MoveNextAsync will block until data arrives.
+        var enumerator = service.FollowSpansAsync(["service1"], null, null, null).GetAsyncEnumerator();
+        var moveNextTask = enumerator.MoveNextAsync();
+
+        // The task should not complete yet because the resource doesn't exist.
+        Assert.False(moveNextTask.IsCompleted);
+
+        // Now add spans for the resource - this should unblock the stream.
+        await AddSpans(repository, count: 1);
+
+        Assert.True(await moveNextTask.DefaultTimeout());
+        Assert.NotNull(enumerator.Current);
+
+        await enumerator.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FollowLogsAsync_WaitsForResourceToAppear_ThenStreams()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+        var service = CreateService(repository);
+
+        // Start enumerating - MoveNextAsync will block until data arrives.
+        var enumerator = service.FollowLogsAsync(["service1"], null, null, null, default).GetAsyncEnumerator();
+        var moveNextTask = enumerator.MoveNextAsync();
+
+        // The task should not complete yet because the resource doesn't exist.
+        Assert.False(moveNextTask.IsCompleted);
+
+        // Now add logs for the resource - this should unblock the stream.
+        await AddLogs(repository, ["hello"]);
+
+        Assert.True(await moveNextTask.DefaultTimeout());
+        Assert.NotNull(enumerator.Current);
+
+        await enumerator.DisposeAsync();
+    }
+
+    // SpanId is serialized as lowercase hex per the OTLP/JSON spec
+    // (see https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding), and our
+    // CreateSpan test helper stores the friendly identifier as the raw UTF-8 bytes of
+    // the SpanId. Decode the hex back to text so assertions can compare against the
+    // original identifier the test supplied.
+    private static string DecodeSpanId(string? hexSpanId)
+    {
+        Assert.NotNull(hexSpanId);
+        return Encoding.UTF8.GetString(Convert.FromHexString(hexSpanId));
+    }
+
+    [Fact]
+    public async Task GetSpans_WithReplicatedResourceName_DoesNotThrow()
+    {
+        // When multiple replicas share the same base ResourceName, the resource resolver
+        // must not throw InvalidOperationException from SingleOrDefault. It should treat
+        // the ambiguous base name as unresolved and return no spans.
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        // Add two replicas of the same service with different instance IDs.
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "myapp", instanceId: "replica-1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "s1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            }
+        });
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "myapp", instanceId: "replica-2"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t2", spanId: "s2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        // Querying by the base name "myapp" should not throw — it returns null (unresolved).
+        var result = await service.GetSpansAsync(resourceNames: ["myapp"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithCompositeResourceKey_ResolvesReplica()
+    {
+        // When the caller uses the composite ResourceKey string (e.g. "myapp-replica-1"),
+        // the resolver should find the exact replica.
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "myapp", instanceId: "replica-1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "s1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            }
+        });
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "myapp", instanceId: "replica-2"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t2", spanId: "s2", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        // The ResourceKey for the first replica. OtlpResource composes it as "name-instanceId".
+        var resources = repository.GetResources();
+        var replica1Key = resources.First(r => r.ResourceKey.InstanceId == "replica-1").ResourceKey.ToString();
+
+        var result = await service.GetSpansAsync(resourceNames: [replica1Key], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithResourceNameMatchingCompositeResourceKey_ReturnsNull()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api-1", instanceId: "standalone"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "standalone", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            },
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api", instanceId: "1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t2", spanId: "replica", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: ["api-1"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithAmbiguousCompositeResourceKey_ReturnsNull()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api-a", instanceId: "1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "first", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            },
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api", instanceId: "a-1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t2", spanId: "second", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: ["api-a-1"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithBaseResourceNameAndMixedInstanceIds_ReturnsNull()
+    {
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api", instanceId: null),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "singleton", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            },
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "api", instanceId: "1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t2", spanId: "replica", startTime: s_testTime.AddMinutes(2), endTime: s_testTime.AddMinutes(3)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: ["api"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithUniqueResourceName_ResolvesDirectly()
+    {
+        // When only one resource matches the base name, it should resolve directly.
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "unique-service", instanceId: "inst1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "s1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: ["unique-service"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
+    }
+
+    [Fact]
+    public async Task GetSpans_WithDifferentCaseResourceName_ResolvesCaseInsensitively()
+    {
+        // Resource names are case-insensitive throughout the dashboard.
+        using var repositoryContext = SqliteRepositoryTestHelpers.CreateTemporaryTelemetryRepository();
+        var repository = repositoryContext.Repository;
+
+        await repository.AddTracesAsync(new AddContext(), new RepeatedField<ResourceSpans>
+        {
+            new ResourceSpans
+            {
+                Resource = CreateResource(name: "myapp", instanceId: "inst1"),
+                ScopeSpans = { new ScopeSpans { Scope = CreateScope(), Spans = { CreateSpan(traceId: "t1", spanId: "s1", startTime: s_testTime, endTime: s_testTime.AddMinutes(1)) } } }
+            }
+        });
+
+        var service = CreateService(repository);
+
+        var result = await service.GetSpansAsync(resourceNames: ["MYAPP"], traceId: null, hasError: null, limit: null, cancellationToken: CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal(1, result.ReturnedCount);
     }
 }

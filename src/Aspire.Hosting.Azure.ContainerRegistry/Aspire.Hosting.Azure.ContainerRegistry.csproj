@@ -9,10 +9,7 @@
 
   <ItemGroup>
     <Compile Include="$(RepoRoot)src\Shared\AzureRoleAssignmentUtils.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <InternalsVisibleTo Include="Aspire.Hosting.Azure.Tests" />
+    <Compile Include="$(RepoRoot)src\Shared\ContainerRegistryInfrastructure.cs" />
   </ItemGroup>
 
   <ItemGroup>

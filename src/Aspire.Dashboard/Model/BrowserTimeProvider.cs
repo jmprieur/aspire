@@ -1,6 +1,9 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Globalization;
+using Aspire.Dashboard.Utils;
+
 namespace Aspire.Dashboard.Model;
 
 /// <summary>
@@ -10,10 +13,13 @@ namespace Aspire.Dashboard.Model;
 /// - BrowserTimeProvider must be scoped to the user's session.
 /// - The built-in TimeProvider registration must be singleton for the system time (used by auth).
 /// </summary>
-public class BrowserTimeProvider : TimeProvider
+public class BrowserTimeProvider : TimeProvider, ITimeFormatProvider
 {
     private readonly ILogger _logger;
     private TimeZoneInfo? _browserLocalTimeZone;
+    private TimeFormat? _browserTimeFormat;
+
+    public TimeFormat ConfiguredTimeFormat { get; set; } = TimeFormat.System;
 
     public BrowserTimeProvider(ILoggerFactory loggerFactory)
     {
@@ -35,5 +41,41 @@ public class BrowserTimeProvider : TimeProvider
 
         _logger.LogDebug("Browser time zone set to '{TimeZone}' with UTC offset {UtcOffset}.", timeZoneInfo.Id, timeZoneInfo.BaseUtcOffset);
         _browserLocalTimeZone = timeZoneInfo;
+    }
+
+    public TimeFormat ResolvedTimeFormat
+    {
+        get
+        {
+            if (ConfiguredTimeFormat == TimeFormat.System)
+            {
+                return _browserTimeFormat ?? TimeFormat.System;
+            }
+
+            return ConfiguredTimeFormat;
+        }
+    }
+
+    public void SetBrowserTimeFormat(TimeFormat timeFormat)
+    {
+        _browserTimeFormat = timeFormat;
+    }
+
+    public void SetConfiguredTimeFormat(TimeFormat timeFormat)
+    {
+        ConfiguredTimeFormat = timeFormat;
+    }
+
+    /// <summary>
+    /// Determines whether the specified time format uses a 24-hour clock.
+    /// </summary>
+    internal static bool Is24HourFormat(TimeFormat timeFormat)
+    {
+        return timeFormat switch
+        {
+            TimeFormat.TwentyFourHour => true,
+            TimeFormat.TwelveHour => false,
+            _ => DateTimeFormatInfo.CurrentInfo.LongTimePattern.StartsWith('H')
+        };
     }
 }

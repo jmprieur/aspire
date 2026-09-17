@@ -2,12 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.ClientModel;
+using Aspire;
 using Aspire.Azure.AI.OpenAI;
 using Aspire.Azure.Common;
 using Azure.AI.OpenAI;
 using Azure.Core;
 using Azure.Core.Extensions;
-using Azure.Identity;
 using Microsoft.Extensions.Azure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -111,7 +111,7 @@ public static class AspireAzureOpenAIExtensions
                     }
                     else
                     {
-                        return new AzureOpenAIClient(settings.Endpoint, settings.Credential ?? new DefaultAzureCredential(), options);
+                        return new AzureOpenAIClient(settings.Endpoint, settings.Credential ?? AzureCredentialHelper.CreateDefaultAzureCredential(), options);
                     }
                 }
             });
@@ -131,7 +131,11 @@ public static class AspireAzureOpenAIExtensions
 
         protected override IHealthCheck CreateHealthCheck(AzureOpenAIClient client, AzureOpenAISettings settings)
         {
-            throw new NotImplementedException();
+            // Azure OpenAI does not expose a lightweight read-only health check endpoint.
+            // GetOpenAIModelClient() explicitly throws NotSupportedException in AzureOpenAIClient,
+            // and all other sub-clients require a deployment name and initiate inference operations.
+            // Health checks remain disabled until a suitable API is available in the Azure.AI.OpenAI SDK.
+            throw new NotSupportedException("Health checks are not supported for AzureOpenAIClient.");
         }
 
         protected override bool GetHealthCheckEnabled(AzureOpenAISettings settings)

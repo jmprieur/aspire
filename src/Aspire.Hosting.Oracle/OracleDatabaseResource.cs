@@ -13,6 +13,7 @@ namespace Aspire.Hosting.ApplicationModel;
 /// <param name="name">The name of the resource.</param>
 /// <param name="databaseName">The database name.</param>
 /// <param name="parent">The Oracle Database parent resource associated with this database.</param>
+/// <ats-summary>A resource that represents an Oracle Database database. This is a child resource of a <ats-see cref="!:type:OracleDatabaseServerResource" />.</ats-summary>
 [DebuggerDisplay("Type = {GetType().Name,nq}, Name = {Name}, Database = {DatabaseName}")]
 [AspireExport(ExposeProperties = true)]
 public class OracleDatabaseResource(string name, string databaseName, OracleDatabaseServerResource parent)
@@ -26,8 +27,6 @@ public class OracleDatabaseResource(string name, string databaseName, OracleData
     /// <summary>
     /// Gets the connection string expression for the Oracle Database.
     /// </summary>
-    /// <remarks>This property is not available in polyglot app hosts.</remarks>
-    [AspireExportIgnore]
     public ReferenceExpression ConnectionStringExpression =>
        ReferenceExpression.Create($"{Parent}/{DatabaseName}");
 

@@ -1,0 +1,41 @@
+import aspire.*;
+
+void main() throws Exception {
+        var builder = DistributedApplication.CreateBuilder();
+        // 1) addAzureCosmosDB
+        var cosmos = builder.addAzureCosmosDB("cosmos");
+        cosmos.configureInfrastructure((infrastructure) -> {
+            var account = infrastructure.getCosmosDBAccount();
+            account.tags().set("provisioning-proxy", "java");
+            var bypassResourceId = infrastructure.createCosmosDBResourceIdentifier(
+                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/shared/providers/Microsoft.DocumentDB/databaseAccounts/bypass");
+            account.networkAclBypassResourceIds().add(bypassResourceId);
+        });
+        // 2) withDefaultAzureSku
+        cosmos.withDefaultAzureSku();
+        // 3) addCosmosDatabase
+        var db = cosmos.addCosmosDatabase("app-db", "appdb");
+        // 4) addContainer (single partition key path)
+        db.addContainer("orders", "/orderId", "orders-container");
+        // 5) addContainer (IEnumerable<string> partition key paths)
+        db.addContainer("events", new String[] { "/tenantId", "/eventId" }, "events-container");
+        // 6) withAccessKeyAuthentication
+        cosmos.withAccessKeyAuthentication();
+        // 7) withAccessKeyAuthentication(keyVault)
+        var keyVault = builder.addAzureKeyVault("kv");
+        cosmos.withAccessKeyAuthentication(keyVault);
+        // 8) runAsEmulator + emulator container configuration methods
+        var cosmosEmulator = builder.addAzureCosmosDB("cosmos-emulator");
+        cosmosEmulator.runAsEmulator((emulator) -> {
+            emulator.withDataVolume("cosmos-emulator-data"); // 9) withDataVolume
+            emulator.withGatewayPort(18081.0); // 10) withGatewayPort
+            emulator.withDataExplorer(11234.0); // 11) withDataExplorer
+        });
+        // 12) runAsClassicEmulator + 13) withPartitionCount
+        var cosmosClassic = builder.addAzureCosmosDB("cosmos-classic-emulator");
+        cosmosClassic.runAsClassicEmulator((emulator) -> {
+                emulator.withPartitionCount(25);
+            });
+        var app = builder.build();
+        app.run();
+    }

@@ -1,13 +1,13 @@
 # Aspire.Azure.AI.Inference library
 
-Registers [ChatCompletionsClient](https://learn.microsoft.com/dotnet/api/azure.ai.inference.chatcompletionsclient) as a singleton in the DI container for connecting to Azure AI Foundry and GitHub Models. Enables corresponding metrics, logging and telemetry.
+Registers [ChatCompletionsClient](https://learn.microsoft.com/dotnet/api/azure.ai.inference.chatcompletionsclient) and [EmbeddingsClient](https://learn.microsoft.com/dotnet/api/azure.ai.inference.embeddingsclient) as singletons in the DI container for connecting to Microsoft Foundry. Enables corresponding health checks, metrics, logging and telemetry.
 
 ## Getting started
 
 ### Prerequisites
 
 - Azure subscription - [create one for free](https://azure.microsoft.com/free/)
-- Azure AI Foundry Resource - [create an Azure AI Foundry resource](https://learn.microsoft.com/azure/ai-foundry/how-to/develop/sdk-overview?tabs=sync&pivots=programming-language-csharp)
+- Microsoft Foundry Resource - [create an Microsoft Foundry resource](https://learn.microsoft.com/azure/ai-foundry/how-to/develop/sdk-overview?tabs=sync&pivots=programming-language-csharp)
 
 ### Install the package
 
@@ -25,6 +25,12 @@ In the _Program.cs_ file of your project, call the `AddAzureChatCompletionsClien
 builder.AddAzureChatCompletionsClient("connectionName");
 ```
 
+To register an `EmbeddingsClient`, call `AddAzureEmbeddingsClient` with the connection name:
+
+```csharp
+builder.AddAzureEmbeddingsClient("connectionName");
+```
+
 You can then retrieve the `ChatCompletionsClient` instance using dependency injection. For example, to retrieve the client from a Web API controller:
 
 ```csharp
@@ -36,25 +42,25 @@ public CognitiveController(ChatCompletionsClient client)
 }
 ```
 
-See the [Azure AI Foundry SDK quickstarts](https://learn.microsoft.com/azure/ai-foundry/how-to/develop/sdk-overview) for examples on using the `ChatCompletionsClient`.
+See the [Microsoft Foundry SDK quickstarts](https://learn.microsoft.com/azure/ai-foundry/how-to/develop/sdk-overview) for examples on using the `ChatCompletionsClient`.
 
 ## Configuration
 
-The Aspire Azure AI Inference library provides multiple options to configure the Azure AI Foundry Service based on the requirements and conventions of your project. Note that either an `Endpoint` and a deployment identifier (`Deployment` or `Model`), or a `ConnectionString` is required to be supplied.
+The Aspire Azure AI Inference library provides multiple options to configure the Microsoft Foundry Service based on the requirements and conventions of your project. Note that either an `Endpoint` and a deployment identifier (`Deployment` or `Model`), or a `ConnectionString` is required to be supplied.
 
 ### Use a connection string
 
-A connection can be constructed from the **Keys, Deployment ID and Endpoint** tab with the format `Endpoint={endpoint};Key={key};Deployment={deploymentName}`. You can provide the name of the connection string when calling `builder.AddChatCompletionsClient()`:
+A connection can be constructed from the **Keys, Deployment ID and Endpoint** tab with the format `Endpoint={endpoint};Key={key};Deployment={deploymentName}`. You can provide the name of the connection string when calling `builder.AddAzureChatCompletionsClient()`:
 
 ```csharp
-builder.AddChatCompletionsClient("connectionName");
+builder.AddAzureChatCompletionsClient("connectionName");
 ```
 
 And then the connection string will be retrieved from the `ConnectionStrings` configuration section. Two connection formats are supported:
 
-#### Azure AI Foundry Endpoint
+#### Microsoft Foundry Endpoint
 
-The recommended approach is to use an Endpoint, which works with the `ChatCompletionsClientSettings.Credential` property to establish a connection. If no credential is configured, the [DefaultAzureCredential](https://learn.microsoft.com/dotnet/api/azure.identity.defaultazurecredential) is used.
+The recommended approach is to use an Endpoint, which works with the `ChatCompletionsClientSettings.TokenCredential` property to establish a connection. If no credential is configured, a [default TokenCredential is created based on the current environment](https://aka.ms/aspire/default-azure-credential).
 
 ```json
 {
@@ -80,8 +86,8 @@ Alternatively, a custom connection string can be used.
 
 The library supports multiple formats for specifying the deployment:
 
-- **`Deployment={deploymentName}`** - Preferred format for Azure AI Foundry deployments
-- **`Model={modelName}`** - Format used by GitHub Models
+- **`Deployment={deploymentName}`** - Preferred format for Microsoft Foundry deployments
+- **`Model={modelName}`** - Legacy model-name format
 
 Only one of these keys should be present in a connection string. If multiple are provided, an `ArgumentException` will be thrown.
 
@@ -95,6 +101,7 @@ The Aspire Azure AI Inference library supports [Microsoft.Extensions.Configurati
     "Azure": {
       "AI": {
         "Inference": {
+          "DisableHealthChecks": false,
           "DisableTracing": false,
           "ClientOptions": {
             "UserAgentApplicationId": "myapp"
@@ -108,11 +115,13 @@ The Aspire Azure AI Inference library supports [Microsoft.Extensions.Configurati
 
 ### Use inline delegates
 
-You can also pass the `Action<ChatCompletionsClientSettings> configureSettings` delegate to set up some or all the options inline, for example to disable tracing from code:
+You can also pass the `Action<ChatCompletionsClientSettings> configureSettings` delegate to set up some or all the options inline, for example to disable health checks from code:
 
 ```csharp
-builder.AddAzureChatCompletionsClient("connectionName", settings => settings.DisableTracing = true);
+builder.AddAzureChatCompletionsClient("connectionName", settings => settings.DisableHealthChecks = true);
 ```
+
+Health checks are enabled by default for Microsoft Foundry model inference endpoints and use the service's `/info` operation. The Azure AI Inference SDK does not support this operation for Azure OpenAI or Foundry Local endpoints, so health checks are not registered when an Azure OpenAI or loopback endpoint is detected. Set `DisableHealthChecks` to `true` for any other endpoint that does not support `/info`.
 
 You can also setup the [AzureAIInferenceClientOptions](https://learn.microsoft.com/dotnet/api/azure.ai.inference.AzureAIInferenceClientOptions) using the optional `Action<IAzureClientBuilder<ChatCompletionsClient, AzureAIInferenceClientOptions>> configureClientBuilder` parameter of the `AddAzureChatCompletionsClient` method. For example, to set the client ID for this client:
 
@@ -148,8 +157,8 @@ or by setting the "AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE" environment variab
 ## Additional documentation
 
 * https://learn.microsoft.com/dotnet/api/azure.ai.inference
-* https://github.com/dotnet/aspire/tree/main/src/Components/README.md
+* https://github.com/microsoft/aspire/tree/main/src/Components/README.md
 
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire

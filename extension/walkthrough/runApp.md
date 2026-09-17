@@ -1,19 +1,13 @@
 # Run your app
 
-Use the **Run apphost** or **Debug apphost** buttons in the sidebar, or run the commands from the Command Palette. You can also right-click an apphost in the Aspire view.
+Choose your AppHost and start a debug session:
 
-When you run, the extension:
-1. Discovers the apphost project in your workspace
-2. Builds your solution
-3. Launches all services in the correct order
-4. Opens the **Aspire Dashboard** for real-time monitoring
+> [Debug AppHost](command:aspire-vscode.debugAppHostCommand)
 
-### Debugging
-When you **debug** instead of run, the extension attaches debuggers to your services automatically — set breakpoints in any project and they'll be hit as requests flow through your app.
+You can also press **F5** to start the same debug flow, or use **Run AppHost** from the Aspire view when you do not need a debugger.
 
-### The dashboard
-Once running, the dashboard shows all your resources, endpoints, logs, traces, and metrics in one place:
+Aspire starts every resource in dependency order. In debug mode, the extension also connects supported VS Code debuggers so breakpoints work across your app.
 
-![Aspire dashboard showing running resources](../resources/aspire-dashboard-dark.png)
+For supported AppHost languages, the editor shows live resource state in your AppHost source and quick actions for logs, restart, stop, and start.
 
-To learn more, see the [Aspire Dashboard overview](https://aspire.dev/dashboard/overview/).
+[Learn more about the Aspire extension](https://aspire.dev/get-started/aspire-vscode-extension/)

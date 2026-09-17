@@ -3,9 +3,11 @@
 
 using Microsoft.AspNetCore.InternalTesting;
 using System.Globalization;
-using Aspire.Cli.Configuration;
+using System.Diagnostics;
 using Aspire.Cli.DotNet;
 using Aspire.Cli.Resources;
+using Aspire.Cli.Tests.TestServices;
+using Aspire.Cli.Tests.Utils;
 using Microsoft.Extensions.Configuration;
 using Semver;
 
@@ -16,7 +18,7 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_WhenDotNetIsAvailable_ReturnsTrue()
     {
-        var installer = new DotNetSdkInstaller(new MinimumSdkCheckFeature(), CreateEmptyConfiguration());
+        var installer = CreateDotNetSdkInstaller();
 
         // This test assumes the test environment has .NET SDK installed
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -25,12 +27,68 @@ public class DotNetSdkInstallerTests
     }
 
     [Fact]
+    public async Task CheckAsync_UsesResolvedDotNetPath()
+    {
+        string? capturedDotNetPath = null;
+        var environment = new TestEnvironment();
+        var installer = CreateDotNetSdkInstaller(environment: environment, createProcessStartInfo: (dotnetPath, arguments) =>
+        {
+            capturedDotNetPath = dotnetPath;
+            return new ProcessStartInfo(dotnetPath, arguments)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+        });
+
+        await installer.CheckAsync(TestContext.Current.CancellationToken).DefaultTimeout();
+
+        Assert.Equal(DotNetSdkInstaller.ResolveDotNetPath(environment), capturedDotNetPath);
+    }
+
+    [Fact]
+    public async Task CheckAsync_WhenCanceled_KillsDotNetProcessTree()
+    {
+        var tempDirectory = Directory.CreateTempSubdirectory();
+        var parentPidFile = Path.Combine(tempDirectory.FullName, "dotnet-parent.pid");
+        var childPidFile = Path.Combine(tempDirectory.FullName, "dotnet-child.pid");
+        var parentPid = 0;
+        var childPid = 0;
+        using var cancellationTokenSource = new CancellationTokenSource();
+
+        try
+        {
+            var startInfo = await CreateBlockingDotNetShimAsync(tempDirectory, parentPidFile, childPidFile);
+            var installer = CreateDotNetSdkInstaller(createProcessStartInfo: (_, _) => startInfo);
+            var checkTask = installer.CheckAsync(cancellationTokenSource.Token);
+
+            parentPid = await ProcessTestHelpers.WaitForProcessIdAsync(parentPidFile, TestContext.Current.CancellationToken)
+                .DefaultTimeout();
+            childPid = await ProcessTestHelpers.WaitForProcessIdAsync(childPidFile, TestContext.Current.CancellationToken)
+                .DefaultTimeout();
+
+            cancellationTokenSource.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => checkTask).DefaultTimeout();
+            Assert.True(ProcessTestHelpers.WaitForProcessExit(parentPid, TimeSpan.FromSeconds(10)), $"Expected dotnet process {parentPid} to exit.");
+            Assert.True(ProcessTestHelpers.WaitForProcessExit(childPid, TimeSpan.FromSeconds(10)), $"Expected child process {childPid} to exit.");
+        }
+        finally
+        {
+            cancellationTokenSource.Cancel();
+            ProcessTestHelpers.TryKillProcess(parentPid);
+            ProcessTestHelpers.TryKillProcess(childPid);
+            tempDirectory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CheckAsync_WithMinimumVersion_WhenDotNetIsAvailable_ReturnsTrue()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride("8.0.0");
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // This test assumes the test environment has .NET SDK installed with a version >= 8.0.0
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -41,10 +99,8 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_WithActualMinimumVersion_BehavesCorrectly()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride(DotNetSdkInstaller.MinimumSdkVersion);
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // Use the actual minimum version constant and check the behavior
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -57,10 +113,8 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_WithHighMinimumVersion_ReturnsFalse()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride("99.0.0");
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // Use an unreasonably high version that should not exist
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -71,10 +125,8 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_WithInvalidMinimumVersion_ReturnsFalse()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride("invalid.version");
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // Use an invalid version string
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -83,26 +135,10 @@ public class DotNetSdkInstallerTests
     }
 
     [Fact]
-    public async Task CheckReturnsTrueIfFeatureDisabled()
-    {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, false);
-        var configuration = CreateConfigurationWithOverride("invalid.version");
-        var installer = new DotNetSdkInstaller(features, configuration);
-
-        // Use an invalid version string
-        var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
-
-        Assert.True(success);
-    }
-
-    [Fact]
     public async Task CheckAsync_UsesArchitectureSpecificCommand()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride("8.0.0");
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // This test verifies that the architecture-specific command is used
         // Since the implementation adds --arch flag, it should still work correctly
@@ -116,7 +152,7 @@ public class DotNetSdkInstallerTests
     public async Task CheckAsync_UsesOverrideMinimumSdkVersion_WhenConfigured()
     {
         var configuration = CreateConfigurationWithOverride("8.0.0");
-        var installer = new DotNetSdkInstaller(new MinimumSdkCheckFeature(), configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // The installer should use the override version instead of the constant
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -128,7 +164,7 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_UsesDefaultMinimumSdkVersion_WhenNotConfigured()
     {
-        var installer = new DotNetSdkInstaller(new MinimumSdkCheckFeature(), CreateEmptyConfiguration());
+        var installer = CreateDotNetSdkInstaller();
 
         // Call the parameterless method that should use the default constant
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -140,9 +176,7 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_UsesMinimumSdkVersion()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
-        var installer = new DotNetSdkInstaller(features, CreateEmptyConfiguration());
+        var installer = CreateDotNetSdkInstaller();
 
         // Call the parameterless method that should use the minimum SDK version
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -154,10 +188,8 @@ public class DotNetSdkInstallerTests
     [Fact]
     public async Task CheckAsync_UsesOverrideVersion_WhenOverrideConfigured()
     {
-        var features = new TestFeatures()
-            .SetFeature(KnownFeatures.MinimumSdkCheckEnabled, true);
         var configuration = CreateConfigurationWithOverride("8.0.0");
-        var installer = new DotNetSdkInstaller(features, configuration);
+        var installer = CreateDotNetSdkInstaller(configuration);
 
         // The installer should use the override version instead of the baseline constant
         var (success, _, _) = await installer.CheckAsync().DefaultTimeout();
@@ -195,7 +227,7 @@ public class DotNetSdkInstallerTests
             "10.0.100",
             "(not found)");
 
-        Assert.Equal("The Aspire CLI requires .NET SDK version 10.0.100 or later. Detected: (not found).", message);
+        Assert.Equal("C# AppHost requires .NET SDK version 10.0.100 or later. Detected: (not found).", message);
     }
 
     [Fact]
@@ -267,6 +299,19 @@ public class DotNetSdkInstallerTests
         return new ConfigurationBuilder().Build();
     }
 
+    private static DotNetSdkInstaller CreateDotNetSdkInstaller(
+        IConfiguration? configuration = null,
+        IEnvironment? environment = null,
+        Func<string, string, ProcessStartInfo>? createProcessStartInfo = null)
+    {
+        configuration ??= CreateEmptyConfiguration();
+        environment ??= new TestEnvironment();
+
+        return createProcessStartInfo is null
+            ? new DotNetSdkInstaller(configuration, environment)
+            : new DotNetSdkInstaller(configuration, environment, createProcessStartInfo);
+    }
+
     private static IConfiguration CreateConfigurationWithOverride(string overrideVersion)
     {
         return new ConfigurationBuilder()
@@ -276,28 +321,56 @@ public class DotNetSdkInstallerTests
             })
             .Build();
     }
-}
 
-public class MinimumSdkCheckFeature(bool enabled = true) : IFeatures
-{
-    public bool IsFeatureEnabled(string featureName, bool defaultValue = false)
+    private static async Task<ProcessStartInfo> CreateBlockingDotNetShimAsync(DirectoryInfo directory, string parentPidFile, string childPidFile)
     {
-        return featureName == KnownFeatures.MinimumSdkCheckEnabled ? enabled : false;
-    }
-}
+        if (OperatingSystem.IsWindows())
+        {
+            var scriptFile = Path.Combine(directory.FullName, "dotnet-shim.ps1");
+            var script =
+                "$child = Start-Process cmd.exe -ArgumentList '/c', 'ping -n 60 127.0.0.1 > nul' -PassThru" + Environment.NewLine +
+                $"$PID | Set-Content -Path '{parentPidFile.Replace("'", "''", StringComparison.Ordinal)}'" + Environment.NewLine +
+                $"$child.Id | Set-Content -Path '{childPidFile.Replace("'", "''", StringComparison.Ordinal)}'" + Environment.NewLine +
+                "$child.WaitForExit()" + Environment.NewLine;
+            await File.WriteAllTextAsync(scriptFile, script);
 
-public class TestFeatures : IFeatures
-{
-    private readonly Dictionary<string, bool> _features = new();
+            var startInfo = new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-ExecutionPolicy");
+            startInfo.ArgumentList.Add("Bypass");
+            startInfo.ArgumentList.Add("-File");
+            startInfo.ArgumentList.Add(scriptFile);
+            return startInfo;
+        }
 
-    public TestFeatures SetFeature(string featureName, bool value)
-    {
-        _features[featureName] = value;
-        return this;
+        var shellFile = Path.Combine(directory.FullName, "dotnet");
+        var shellScript =
+            "#!/usr/bin/env bash" + Environment.NewLine +
+            $"echo $$ > '{EscapeShellPath(parentPidFile)}'" + Environment.NewLine +
+            "sleep 60 &" + Environment.NewLine +
+            $"echo $! > '{EscapeShellPath(childPidFile)}'" + Environment.NewLine +
+            "wait $!" + Environment.NewLine;
+        await File.WriteAllTextAsync(shellFile, shellScript);
+        File.SetUnixFileMode(
+            shellFile,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        return new ProcessStartInfo(shellFile)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
     }
 
-    public bool IsFeatureEnabled(string featureName, bool defaultValue = false)
-    {
-        return _features.TryGetValue(featureName, out var value) ? value : defaultValue;
-    }
+    private static string EscapeShellPath(string path) => path.Replace("'", "'\"'\"'", StringComparison.Ordinal);
 }

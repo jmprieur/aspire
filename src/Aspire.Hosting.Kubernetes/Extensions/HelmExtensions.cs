@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 
@@ -11,7 +12,6 @@ internal static partial class HelmExtensions
     private const string StatefulSetKey = "statefulset";
     private const string ServiceKey = "service";
     private const string PvcKey = "pvc";
-    private const string PvKey = "pv";
     private const string ValuesSegment = ".Values";
     public const string ParametersKey = "parameters";
     public const string SecretsKey = "secrets";
@@ -45,7 +45,7 @@ internal static partial class HelmExtensions
         => $"{ValuesSegment}.{ConfigKey}.{resourceName}.{parameterName}".ToHelmValuesSectionName().ToHelmExpression();
 
     public static string ToHelmChartName(this string applicationName)
-        => applicationName.ToLower().Replace("_", "-").Replace(".", "-");
+        => applicationName.ToLowerInvariant().Replace("_", "-").Replace(".", "-");
 
     /// <summary>
     /// Converts the specified resource name into a Kubernetes resource name.
@@ -75,9 +75,6 @@ internal static partial class HelmExtensions
     public static string ToPvcName(this string resourceName, string volumeName)
         => $"{resourceName.ToKubernetesResourceName()}-{volumeName}-{PvcKey}";
 
-    public static string ToPvName(this string resourceName, string volumeName)
-        => $"{resourceName.ToKubernetesResourceName()}-{volumeName}-{PvKey}";
-
     public static bool ContainsHelmExpression(this string value)
         => ExpressionPattern().IsMatch(value);
 
@@ -89,15 +86,69 @@ internal static partial class HelmExtensions
         => ExpressionPattern().IsMatch(value)
         && value.Contains($"{ValuesSegment}.{SecretsKey}.", StringComparison.Ordinal);
 
+    public static bool ContainsHelmFlowControlExpression(this string value)
+        => HelmFlowControlExpressionPattern().IsMatch(value);
+
+    /// <summary>
+    /// Evaluates a string as a Helm template and quotes the complete result as a YAML scalar.
+    /// </summary>
+    public static string ToQuotedHelmTemplateExpression(this string value)
+        => $"{StartDelimiter} tpl {JsonSerializer.Serialize(value)} . {PipelineDelimiter} quote {EndDelimiter}";
+
     public static (bool, ScalarStyle?) ShouldDoubleQuoteString(string value)
     {
-        var shouldApply = ScalarExpressionPattern().IsMatch(value) is false
-                          || EndWithNonStringTypePattern().IsMatch(value) is false;
-        return (shouldApply, shouldApply is false ? ScalarStyle.ForcePlain : null);
+        // Flow control expressions and generated `tpl ... | quote` wrappers must be rendered
+        // as plain YAML so Helm can evaluate them before the rendered output is parsed as YAML.
+        // This check runs first because if/else blocks contain multiple {{ }} pairs and won't
+        // match ScalarExpressionPattern.
+        if (HelmFlowControlPattern().IsMatch(value) ||
+            QuotedTemplateExpressionPattern().IsMatch(value))
+        {
+            return (false, ScalarStyle.ForcePlain);
+        }
+
+        if (!ScalarExpressionPattern().IsMatch(value))
+        {
+            return (true, null);
+        }
+
+        // Scalar Helm expressions that contain type conversions (| int, | float64, etc.)
+        // must be rendered as plain (unquoted) YAML so that Helm can process them as
+        // template expressions without YAML escaping interference.
+        if (EndWithNonStringTypePattern().IsMatch(value))
+        {
+            return (false, ScalarStyle.ForcePlain);
+        }
+
+        return (true, null);
     }
 
+    /// <summary>
+    /// Preserves numeric Helm conversions while ensuring the rendered value is written as a string.
+    /// </summary>
+    public static string EnsureStringOutput(this string value)
+    {
+        return EndWithNonStringTypePattern().Replace(value, match =>
+        {
+            var endDelimiterIndex = match.Value.LastIndexOf(EndDelimiter, StringComparison.Ordinal);
+
+            return endDelimiterIndex >= 0
+                ? $"{match.Value[..endDelimiterIndex].TrimEnd()} {PipelineDelimiter} toString {EndDelimiter}"
+                : match.Value;
+        });
+    }
+
+    [GeneratedRegex(@"^\{\{\s*if\b")]
+    internal static partial Regex HelmFlowControlPattern();
+
+    [GeneratedRegex(@"\{\{\s*if\b")]
+    private static partial Regex HelmFlowControlExpressionPattern();
+
+    [GeneratedRegex(@"^\{\{\s*tpl\b.*\|\s*quote\s*\}\}$")]
+    private static partial Regex QuotedTemplateExpressionPattern();
+
     [GeneratedRegex(@"\{\{[^}]*\|\s*(int|int64|float64)\s*\}\}")]
-    private static partial Regex EndWithNonStringTypePattern();
+    internal static partial Regex EndWithNonStringTypePattern();
 
     [GeneratedRegex(@"((?<=^\{\{\s*)(?:[^{}]+?)(?=(?:\}\}$)))")]
     internal static partial Regex ScalarExpressionPattern();

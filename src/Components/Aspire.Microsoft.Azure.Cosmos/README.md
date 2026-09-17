@@ -1,6 +1,6 @@
 # Aspire.Microsoft.Azure.Cosmos library
 
-Registers [CosmosClient](https://learn.microsoft.com/dotnet/api/microsoft.azure.cosmos.cosmosclient) as a singleton in the DI container for connecting to Azure Cosmos DB. Enables corresponding logging and telemetry.
+Registers [CosmosClient](https://learn.microsoft.com/dotnet/api/microsoft.azure.cosmos.cosmosclient) as a singleton in the DI container for connecting to Azure Cosmos DB. Enables corresponding health check, logging and telemetry.
 
 ## Getting started
 
@@ -54,7 +54,7 @@ And then the connection string will be retrieved from the `ConnectionStrings` co
 
 #### Account Endpoint
 
-The recommended approach is to use an AccountEndpoint, which works with the `MicrosoftAzureCosmosSettings.Credential` property to establish a connection. If no credential is configured, the [DefaultAzureCredential](https://learn.microsoft.com/dotnet/api/azure.identity.defaultazurecredential) is used.
+The recommended approach is to use an AccountEndpoint, which works with the `MicrosoftAzureCosmosSettings.Credential` property to establish a connection. If no credential is configured, a [default TokenCredential is created based on the current environment](https://aka.ms/aspire/default-azure-credential).
 
 ```json
 {
@@ -108,6 +108,32 @@ You can also setup the [CosmosClientOptions](https://learn.microsoft.com/dotnet/
 builder.AddAzureCosmosClient("cosmosConnectionName", configureClientOptions: clientOptions => clientOptions.ApplicationName = "myapp");
 ```
 
+## Health checks
+
+By default, the Aspire Microsoft Azure Cosmos DB integration registers a health check that verifies the Cosmos DB account is reachable. The health check is included in the application's `/health` endpoint, so dependents that `WaitFor` the service's HTTP health (or Kubernetes readiness probes) won't report healthy while Cosmos DB is unreachable.
+
+The health check can be disabled by setting `MicrosoftAzureCosmosSettings.DisableHealthChecks` to `true`, either through configuration:
+
+```json
+{
+  "Aspire": {
+    "Microsoft": {
+      "Azure": {
+        "Cosmos": {
+          "DisableHealthChecks": true
+        }
+      }
+    }
+  }
+}
+```
+
+or in code:
+
+```csharp
+builder.AddAzureCosmosClient("cosmosConnectionName", settings => settings.DisableHealthChecks = true);
+```
+
 ## AppHost extensions
 
 In your AppHost project, install the Aspire Azure CosmosDB Hosting library with [NuGet](https://www.nuget.org):
@@ -152,8 +178,8 @@ builder.AddAzureCosmosClient("cosmos");
 ## Additional documentation
 
 * https://learn.microsoft.com/azure/cosmos-db/nosql/sdk-dotnet-v3
-* https://github.com/dotnet/aspire/tree/main/src/Components/README.md
+* https://github.com/microsoft/aspire/tree/main/src/Components/README.md
 
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire
