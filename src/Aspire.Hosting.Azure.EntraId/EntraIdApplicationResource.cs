@@ -24,15 +24,33 @@ namespace Aspire.Hosting.Azure;
 /// <c>Microsoft.Identity.Abstractions</c>.
 /// </para>
 /// </remarks>
-/// <param name="name">The name of the resource.</param>
-/// <param name="configSectionName">
-/// The configuration section name used for environment variable prefixes.
-/// Defaults to <c>"AzureAd"</c>.
-/// </param>
-public class EntraIdApplicationResource(string name, string configSectionName = "AzureAd")
-    : Resource(name), IResourceWithEnvironment
+public class EntraIdApplicationResource : Resource, IResourceWithEnvironment
 {
     private const string DefaultInstance = "https://login.microsoftonline.com/";
+
+    /// <summary>
+    /// The default configuration section name used for environment variable prefixes.
+    /// </summary>
+    public const string DefaultConfigSectionName = "AzureAd";
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="EntraIdApplicationResource"/> class.
+    /// </summary>
+    /// <param name="name">The name of the resource.</param>
+    /// <param name="configSectionName">
+    /// The configuration section name used for environment variable prefixes.
+    /// Defaults to <c>"AzureAd"</c>.
+    /// </param>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="configSectionName"/> is <see langword="null"/> or empty.
+    /// </exception>
+    public EntraIdApplicationResource(string name, string configSectionName = DefaultConfigSectionName)
+        : base(name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(configSectionName);
+
+        ConfigSectionName = configSectionName;
+    }
 
     /// <summary>
     /// Gets the configuration section name used as the prefix for environment variables.
@@ -41,7 +59,7 @@ public class EntraIdApplicationResource(string name, string configSectionName = 
     /// Environment variables are injected as <c>{ConfigSectionName}__{Key}</c>, which
     /// .NET's configuration system maps to <c>{ConfigSectionName}:{Key}</c> in <c>IConfiguration</c>.
     /// </remarks>
-    public string ConfigSectionName { get; } = configSectionName;
+    public string ConfigSectionName { get; }
 
     // ── Core identity ──────────────────────────────────────────────────────
 
@@ -109,7 +127,7 @@ public class EntraIdApplicationResource(string name, string configSectionName = 
     internal List<EntraIdClientCredential> ClientCredentials { get; } = [];
 
     /// <summary>
-    /// Gets or sets the client capabilities (e.g., <c>"cp1"</c> for Continuous Access Evaluation).
+    /// Gets the client capabilities (e.g., <c>"cp1"</c> for Continuous Access Evaluation).
     /// </summary>
     internal List<string> ClientCapabilities { get; } = [];
 
@@ -306,25 +324,25 @@ public sealed class EntraIdKeyVaultCertificateCredential : EntraIdClientCredenti
 /// in Microsoft.Identity.Web configuration, depending on which identifier is provided.
 /// </para>
 /// <para>
-/// Set either <see cref="Thumbprint"/> or <see cref="DistinguishedName"/> (not both).
+/// Set exactly one of <see cref="Thumbprint"/> or <see cref="DistinguishedName"/>. Setting both,
+/// or neither, causes <see cref="SourceType"/> to throw an <see cref="InvalidOperationException"/>.
 /// </para>
 /// </remarks>
 public sealed class EntraIdStoreCertificateCredential : EntraIdClientCredential
 {
     /// <inheritdoc />
-    public override string SourceType
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when neither or both of <see cref="Thumbprint"/> and <see cref="DistinguishedName"/> are set.
+    /// </exception>
+    public override string SourceType => (Thumbprint, DistinguishedName) switch
     {
-        get
-        {
-            if (Thumbprint is null && DistinguishedName is null)
-            {
-                throw new InvalidOperationException(
-                    $"Either {nameof(Thumbprint)} or {nameof(DistinguishedName)} must be set on {nameof(EntraIdStoreCertificateCredential)}.");
-            }
-
-            return Thumbprint is not null ? "StoreWithThumbprint" : "StoreWithDistinguishedName";
-        }
-    }
+        (not null, null) => "StoreWithThumbprint",
+        (null, not null) => "StoreWithDistinguishedName",
+        (not null, not null) => throw new InvalidOperationException(
+            $"Only one of {nameof(Thumbprint)} or {nameof(DistinguishedName)} can be set on {nameof(EntraIdStoreCertificateCredential)}."),
+        _ => throw new InvalidOperationException(
+            $"Either {nameof(Thumbprint)} or {nameof(DistinguishedName)} must be set on {nameof(EntraIdStoreCertificateCredential)}.")
+    };
 
     /// <summary>
     /// Gets the certificate store path (e.g., <c>"CurrentUser/My"</c> or <c>"LocalMachine/My"</c>).
@@ -351,8 +369,7 @@ public sealed class EntraIdStoreCertificateCredential : EntraIdClientCredential
         {
             envVars[$"{prefix}__CertificateThumbprint"] = Thumbprint;
         }
-
-        if (DistinguishedName is not null)
+        else if (DistinguishedName is not null)
         {
             envVars[$"{prefix}__CertificateDistinguishedName"] = DistinguishedName;
         }

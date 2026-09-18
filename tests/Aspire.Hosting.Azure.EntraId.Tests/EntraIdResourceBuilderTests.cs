@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -364,27 +365,102 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
-    public void WithReference_InjectsEnvironmentVariables()
+    public async Task WithReference_InjectsEnvironmentVariables()
     {
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
-        var secret = appBuilder.AddParameter("EntraSecret", secret: true);
+        var secret = appBuilder.AddParameter("EntraSecret", "super-secret", secret: true);
 
         var entra = appBuilder.AddEntraIdApplication("entra-api")
             .AsExisting(tenantId: "test-tenant-id", clientId: "test-client-id")
             .WithClientSecret(secret)
             .WithAudience("api://test-client-id")
             .WithAppHomeTenantId("home-tenant")
-            .WithClientCapability("cp1");
+            .WithClientCapability("cp1")
+            .WithAzureRegion("westus2")
+            .WithAllowWebApiToBeAuthorizedByACL()
+            .WithExtraQueryParameter("dc", "prod-wst-01");
 
-        var project = appBuilder.AddContainer("api", "myimage")
+        var container = appBuilder.AddContainer("api", "myimage")
             .WithReference(entra);
 
-        var env = project.Resource.Annotations
-            .OfType<EnvironmentCallbackAnnotation>()
-            .ToList();
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
 
-        Assert.NotEmpty(env);
+        Assert.Equal("https://login.microsoftonline.com/", env["AzureAd__Instance"]);
+        Assert.Equal("test-tenant-id", env["AzureAd__TenantId"]);
+        Assert.Equal("test-client-id", env["AzureAd__ClientId"]);
+        Assert.Equal("home-tenant", env["AzureAd__AppHomeTenantId"]);
+        Assert.Equal("true", env["AzureAd__SendX5C"]);
+        Assert.Equal("westus2", env["AzureAd__AzureRegion"]);
+        Assert.Equal("ClientSecret", env["AzureAd__ClientCredentials__0__SourceType"]);
+        Assert.Equal("super-secret", env["AzureAd__ClientCredentials__0__ClientSecret"]);
+        Assert.Equal("cp1", env["AzureAd__ClientCapabilities__0"]);
+        Assert.Equal("api://test-client-id", env["AzureAd__Audiences__0"]);
+        Assert.Equal("true", env["AzureAd__AllowWebApiToBeAuthorizedByACL"]);
+        Assert.Equal("prod-wst-01", env["AzureAd__ExtraQueryParameters__dc"]);
+    }
+
+    [Fact]
+    public async Task WithReference_UsesCustomConfigSectionNameAsPrefix()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api", "AzureAdApi")
+            .AsExisting(tenantId: "test-tenant-id", clientId: "test-client-id");
+
+        var container = appBuilder.AddContainer("api", "myimage")
+            .WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+
+        Assert.Equal("test-tenant-id", env["AzureAdApi__TenantId"]);
+        Assert.Equal("test-client-id", env["AzureAdApi__ClientId"]);
+        Assert.DoesNotContain(env, kvp => kvp.Key.StartsWith("AzureAd__", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task WithReference_EmitsCertificateStoreCredential()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-web")
+            .AsExisting(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .WithCertificateThumbprint("CurrentUser/My", "ABC123");
+
+        var container = appBuilder.AddContainer("web", "myimage")
+            .WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+
+        Assert.Equal("StoreWithThumbprint", env["AzureAd__ClientCredentials__0__SourceType"]);
+        Assert.Equal("CurrentUser/My", env["AzureAd__ClientCredentials__0__CertificateStorePath"]);
+        Assert.Equal("ABC123", env["AzureAd__ClientCredentials__0__CertificateThumbprint"]);
+        Assert.DoesNotContain("AzureAd__ClientCredentials__0__CertificateDistinguishedName", env.Keys);
+    }
+
+    [Fact]
+    public void AddEntraIdApplication_WithCertificateThumbprint()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        appBuilder.AddEntraIdApplication("entra-web")
+            .AsExisting(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .WithCertificateThumbprint("CurrentUser/My", "ABC123");
+
+        using var app = appBuilder.Build();
+
+        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
+
+        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
+        Assert.Single(resource.ClientCredentials);
+        var cred = Assert.IsType<EntraIdStoreCertificateCredential>(resource.ClientCredentials[0]);
+        Assert.Equal("StoreWithThumbprint", cred.SourceType);
+        Assert.Equal("CurrentUser/My", cred.StorePath);
+        Assert.Equal("ABC123", cred.Thumbprint);
+        Assert.Null(cred.DistinguishedName);
     }
 
     [Fact]
@@ -476,6 +552,48 @@ public class EntraIdResourceBuilderTests
         };
 
         Assert.Throws<InvalidOperationException>(() => _ = credential.SourceType);
+    }
+
+    [Fact]
+    public void EntraIdStoreCertificateCredential_ThrowsWhenBothThumbprintAndDN()
+    {
+        var credential = new EntraIdStoreCertificateCredential
+        {
+            StorePath = "CurrentUser/My",
+            Thumbprint = "ABC123",
+            DistinguishedName = "CN=MyCert"
+        };
+
+        Assert.Throws<InvalidOperationException>(() => _ = credential.SourceType);
+    }
+
+    [Fact]
+    public void WithClientSecret_ThrowsWhenParameterIsNotSecret()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var notSecret = appBuilder.AddParameter("EntraWebClientSecret");
+
+        var entra = appBuilder.AddEntraIdApplication("entra-web")
+            .AsExisting(tenantId: "test-tenant-id", clientId: "test-client-id");
+
+        Assert.Throws<ArgumentException>(() => entra.WithClientSecret(notSecret));
+    }
+
+    [Fact]
+    public void EntraIdApplicationResource_ThrowsWhenConfigSectionNameIsEmpty()
+    {
+        Assert.Throws<ArgumentException>(() => new EntraIdApplicationResource("entra-api", string.Empty));
+        Assert.Throws<ArgumentNullException>(() => new EntraIdApplicationResource("entra-api", null!));
+    }
+
+    [Fact]
+    public void AddEntraIdApplication_ThrowsWhenConfigSectionNameIsEmpty()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        Assert.Throws<ArgumentException>(() =>
+            appBuilder.AddEntraIdApplication("entra-api", string.Empty));
     }
 
     [Fact]

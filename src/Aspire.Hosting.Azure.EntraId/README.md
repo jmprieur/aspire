@@ -1,155 +1,119 @@
-# Aspire.Hosting.Azure.EntraId library
+# Microsoft Entra ID hosting integration
 
-Provides extension methods and resource definitions for an Aspire AppHost to configure Microsoft Entra ID application registrations for authentication and authorization.
+Use this integration to model, configure, and orchestrate Microsoft Entra ID application registrations in an Aspire solution.
 
 ## Getting started
 
 ### Prerequisites
 
-- Microsoft Entra ID tenant
-- App registrations created in the [Azure Portal](https://portal.azure.com) or via the Entra ID provisioning skill
+- A Microsoft Entra ID tenant
+- An app registration created in the [Microsoft Entra admin center](https://entra.microsoft.com)
 
-### Install the package
+### Add the integration
 
-In your AppHost project, install the Aspire Entra ID Hosting library with [NuGet](https://www.nuget.org):
+From your AppHost directory, add the `Aspire.Hosting.Azure.EntraId` integration with the Aspire CLI:
 
-```dotnetcli
-dotnet add package Aspire.Hosting.Azure.EntraId
-```
-
-In your service projects, install Microsoft.Identity.Web:
-
-```dotnetcli
-dotnet add package Microsoft.Identity.Web
+```bash
+aspire add Aspire.Hosting.Azure.EntraId
 ```
 
 ## Usage example
 
-Then, in the _AppHost.cs_ file of `AppHost`, add an Entra ID application resource and inject the authentication configuration into consuming services:
+Then, in the AppHost, add an Entra ID application resource and reference it from another resource:
 
 ```csharp
 var tenantId = builder.AddParameter("EntraTenantId");
 var apiClientId = builder.AddParameter("EntraApiClientId");
 
 var entraApi = builder.AddEntraIdApplication("entra-api")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: apiClientId);
+                      .AsExisting(tenantId: tenantId, clientId: apiClientId);
 
-builder.AddProject<Projects.Api>("api")
-    .WithReference(entraApi);
+var api = builder.AddProject<Projects.Api>("api")
+                 .WithReference(entraApi);
 ```
 
-In the API project's _Program.cs_, use Microsoft.Identity.Web directly — the configuration is automatically available via the `AzureAd` section:
+`WithReference` injects environment variables in the form `AzureAd__{Key}` — for example `AzureAd__Instance`, `AzureAd__TenantId`, and `AzureAd__ClientId`. .NET's configuration system maps these to the `AzureAd` configuration section, so the referencing resource reads them as ordinary configuration with no glue code.
+
+To inject into a different configuration section, pass the section name when adding the resource:
 
 ```csharp
-builder.Services.AddAuthentication()
-    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"));
+var entraApi = builder.AddEntraIdApplication("entra-api", "AzureAdApi")
+                      .AsExisting(tenantId: tenantId, clientId: apiClientId);
 ```
 
-For web applications that use OpenID Connect sign-in and call protected APIs:
+## Client credentials
+
+An application that acquires tokens for itself needs a client credential. Each `With*` call appends an entry to the injected `AzureAd__ClientCredentials__{index}__*` variables, and multiple credentials can be configured as a fallback chain.
+
+### Client secret
 
 ```csharp
-var webClientId = builder.AddParameter("EntraWebClientId");
 var webSecret = builder.AddParameter("EntraWebClientSecret", secret: true);
 
 var entraWeb = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithClientSecret(webSecret);
-
-builder.AddProject<Projects.Web>("web")
-    .WithReference(entraWeb);
+                      .AsExisting(tenantId: tenantId, clientId: webClientId)
+                      .WithClientSecret(webSecret);
 ```
 
-In the web project's _Program.cs_:
-
-```csharp
-builder.Services.AddAuthentication()
-    .AddMicrosoftIdentityWebApp(builder.Configuration.GetSection("AzureAd"))
-    .EnableTokenAcquisitionToCallDownstreamApi()
-    .AddInMemoryTokenCaches();
-```
+The parameter must be created with `secret: true`.
 
 ### Federated identity credential with managed identity
 
-For production deployments, use FIC+MSI to avoid storing secrets:
+For deployed applications, use a federated identity credential so that no secret is stored:
 
 ```csharp
-var entra = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithFicMsi();
+var entraWeb = builder.AddEntraIdApplication("entra-web")
+                      .AsExisting(tenantId: tenantId, clientId: webClientId)
+                      .WithFicMsi();
 ```
 
-### Managed certificate (Microsoft-internal)
+Pass a client ID to use a user-assigned managed identity instead of the system-assigned one.
 
-For first-party Microsoft services, use managed certificates — zero secrets, automatic rotation:
+### Certificate from Azure Key Vault
 
 ```csharp
-var entra = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithManagedCertificate();
+var entraWeb = builder.AddEntraIdApplication("entra-web")
+                      .AsExisting(tenantId: tenantId, clientId: webClientId)
+                      .WithCertificateFromKeyVault("https://myvault.vault.azure.net", "MyCert");
 ```
 
-### Certificate from Key Vault
+### Certificate from the certificate store
 
 ```csharp
-var entra = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithCertificateFromKeyVault("https://myvault.vault.azure.net", "MyCert");
+var entraWeb = builder.AddEntraIdApplication("entra-web")
+                      .AsExisting(tenantId: tenantId, clientId: webClientId)
+                      .WithCertificateThumbprint("CurrentUser/My", "ABC123...");
 ```
 
-### Certificate from store
+Use `WithCertificateDistinguishedName` to locate the certificate by subject instead of thumbprint.
+
+### Advanced credentials
+
+For credential types without a dedicated method, use `WithCredential`:
 
 ```csharp
-var entra = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithCertificateThumbprint("CurrentUser/My", "ABC123...");
+var entraWeb = builder.AddEntraIdApplication("entra-web")
+                      .AsExisting(tenantId: tenantId, clientId: webClientId)
+                      .WithCredential(new EntraIdSignedAssertionFileCredential());
 ```
 
-### Advanced: custom credential
+## Sovereign clouds
 
-For credential types not covered by convenience methods, use `WithCredential` directly:
+To target a sovereign cloud instance such as Azure Government:
 
 ```csharp
-var entra = builder.AddEntraIdApplication("entra-web")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: webClientId)
-    .WithCredential(new EntraIdSignedAssertionFileCredential());
+var entraApi = builder.AddEntraIdApplication("entra-api")
+                      .WithInstance("https://login.microsoftonline.us/")
+                      .AsExisting(tenantId: tenantId, clientId: apiClientId);
 ```
-
-### Sovereign clouds
-
-To use a sovereign cloud instance (e.g., Azure Government):
-
-```csharp
-var entra = builder.AddEntraIdApplication("entra-api")
-    .WithInstance("https://login.microsoftonline.us/")
-    .AsExisting(
-        tenantId: tenantId,
-        clientId: clientId);
-```
-
-## How it works
-
-The `WithReference` method injects environment variables like `AzureAd__TenantId`, `AzureAd__ClientId`, etc. into the consuming service. .NET's configuration system automatically maps these to the `AzureAd` configuration section that Microsoft.Identity.Web reads natively — no custom parsing or glue code needed.
 
 ## Additional documentation
 
+* https://aspire.dev/integrations/gallery/
 * https://learn.microsoft.com/entra/identity-platform/
-* https://aspire.dev/
+* https://learn.microsoft.com/entra/msal/dotnet/microsoft-identity-web/
 * https://devblogs.microsoft.com/aspire/securing-dotnet-aspire-apps-with-microsoft-entra-id/
 
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire
