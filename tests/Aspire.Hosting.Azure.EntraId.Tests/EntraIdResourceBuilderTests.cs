@@ -10,13 +10,17 @@ namespace Aspire.Hosting.Azure.EntraId.Tests;
 
 public class EntraIdResourceBuilderTests
 {
+    // Placeholder IDs from the Microsoft Learn documentation. They are well-formed but identify nothing.
+    private const string TenantId = "aaaabbbb-0000-cccc-1111-dddd2222eeee";
+    private const string ClientId = "00001111-aaaa-2222-bbbb-3333cccc4444";
+
     [Fact]
     public void AddEntraIdApplication_CreatesResource()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 
@@ -24,8 +28,8 @@ public class EntraIdResourceBuilderTests
 
         var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
         Assert.Equal("entra-api", resource.Name);
-        Assert.Equal("test-tenant-id", resource.TenantId);
-        Assert.Equal("test-client-id", resource.ClientId);
+        Assert.Equal(TenantId, resource.TenantId);
+        Assert.Equal(ClientId, resource.ClientId);
     }
 
     [Fact]
@@ -34,7 +38,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 
@@ -50,7 +54,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api", "AzureAdApi")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 
@@ -101,6 +105,79 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
+    public void AsExistingApplication_AcceptsTenantDomainName()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: "contoso.onmicrosoft.com", clientId: ClientId);
+
+        Assert.Equal("contoso.onmicrosoft.com", entra.Resource.TenantId);
+    }
+
+    [Theory]
+    [InlineData("organizations", "AzureADMultipleOrgs")]
+    [InlineData("Common", "AzureADandPersonalMicrosoftAccount")]
+    [InlineData("CONSUMERS", "PersonalMicrosoftAccount")]
+    public void AsExistingApplication_ThrowsWhenTenantIdIsSignInKeyword(string tenantId, string expectedSignInAudience)
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.AsExistingApplication(tenantId: tenantId, clientId: ClientId));
+        Assert.Equal("tenantId", exception.ParamName);
+        Assert.Equal(
+            $"'{tenantId}' is not a valid tenant ID. The keywords 'organizations', 'common' and 'consumers' choose who can sign in; " +
+            "they do not identify a tenant. Use the ID of the tenant where the app is registered, and call " +
+            $"WithSignInAudience(EntraIdSignInAudience.{expectedSignInAudience}) instead. (Parameter 'tenantId')",
+            exception.Message);
+    }
+
+    [Fact]
+    public void AsExistingApplication_ThrowsWhenTenantIdIsMalformed()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.AsExistingApplication(tenantId: "my-tenant", clientId: ClientId));
+        Assert.Equal("tenantId", exception.ParamName);
+        Assert.Equal(
+            "'my-tenant' is not a valid tenant ID. Expected the directory (tenant) ID shown on the app registration's Overview page, " +
+            "such as 'aaaabbbb-0000-cccc-1111-dddd2222eeee', or a domain name such as 'contoso.onmicrosoft.com'. (Parameter 'tenantId')",
+            exception.Message);
+    }
+
+    [Fact]
+    public void AsExistingApplication_ThrowsWhenClientIdIsMalformed()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.AsExistingApplication(tenantId: TenantId, clientId: "my-client"));
+        Assert.Equal("clientId", exception.ParamName);
+        Assert.Equal(
+            "'my-client' is not a valid client ID. Expected the application (client) ID shown on the app registration's Overview page, " +
+            "such as '00001111-aaaa-2222-bbbb-3333cccc4444'. (Parameter 'clientId')",
+            exception.Message);
+    }
+
+    [Fact]
+    public void AsExistingApplication_ThrowsWhenIdsAreMissing()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        Assert.Throws<ArgumentNullException>(() => entra.AsExistingApplication(tenantId: (string)null!, clientId: ClientId));
+        Assert.Throws<ArgumentException>(() => entra.AsExistingApplication(tenantId: string.Empty, clientId: ClientId));
+        Assert.Throws<ArgumentNullException>(() => entra.AsExistingApplication(tenantId: TenantId, clientId: (string)null!));
+        Assert.Throws<ArgumentException>(() => entra.AsExistingApplication(tenantId: TenantId, clientId: string.Empty));
+    }
+
+    [Fact]
     public void AddEntraIdApplication_WithClientSecret()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
@@ -108,7 +185,7 @@ public class EntraIdResourceBuilderTests
         var secret = appBuilder.AddParameter("EntraWebClientSecret", secret: true);
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithClientSecret(secret);
 
         using var app = appBuilder.Build();
@@ -128,7 +205,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 
@@ -138,38 +215,87 @@ public class EntraIdResourceBuilderTests
         Assert.Equal("https://login.microsoftonline.com/", resource.Instance);
     }
 
-    [Fact]
-    public void AddEntraIdApplication_WithCustomInstance()
+    [Theory]
+    [InlineData("https://login.microsoftonline.us/")]
+    [InlineData("https://contoso.ciamlogin.com/")]
+    public void AddEntraIdApplication_WithCustomInstance(string instance)
     {
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .WithInstance("https://login.microsoftonline.us/")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .WithInstance(instance)
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 
         var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
 
         var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Equal("https://login.microsoftonline.us/", resource.Instance);
+        Assert.Equal(instance, resource.Instance);
+    }
+
+    [Theory]
+    [InlineData("login.microsoftonline.com")]
+    [InlineData("http://login.microsoftonline.com/")]
+    [InlineData("https://login.microsoftonline.com/?slice=testslice")]
+    [InlineData("https://login.microsoftonline.com/#tenant")]
+    public void WithInstance_ThrowsWhenInstanceIsNotHttpsUrl(string instance)
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.WithInstance(instance));
+        Assert.Equal("instance", exception.ParamName);
+        Assert.Equal(
+            $"'{instance}' is not a valid Entra ID instance. Expected an absolute HTTPS URL with no query string or fragment, " +
+            "such as 'https://login.microsoftonline.com/'. (Parameter 'instance')",
+            exception.Message);
     }
 
     [Fact]
-    public void AddEntraIdApplication_WithAppHomeTenantId()
+    public void AddEntraIdApplication_DefaultSignInAudienceIsHomeTenantOnly()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
 
-        appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
-            .WithAppHomeTenantId("home-tenant-id");
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
 
-        using var app = appBuilder.Build();
+        Assert.Equal(EntraIdSignInAudience.AzureADMyOrg, entra.Resource.SignInAudience);
+    }
 
-        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
+    [Fact]
+    public void WithSignInAudience_ThrowsWhenValueIsNotDefined()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
 
-        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Equal("home-tenant-id", resource.AppHomeTenantId);
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => entra.WithSignInAudience((EntraIdSignInAudience)42));
+        Assert.Equal("signInAudience", exception.ParamName);
+    }
+
+    [Fact]
+    public void AddEntraIdApplication_IsExcludedFromManifest()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        Assert.True(entra.Resource.TryGetAnnotationsOfType<ManifestPublishingCallbackAnnotation>(out var annotations));
+        Assert.Equal(ManifestPublishingCallbackAnnotation.Ignore, Assert.Single(annotations));
+    }
+
+    [Fact]
+    public void AddEntraIdApplication_StartsInWaitingState()
+    {
+        var appBuilder = DistributedApplication.CreateBuilder();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        var annotation = Assert.Single(entra.Resource.Annotations.OfType<ResourceSnapshotAnnotation>());
+        Assert.Equal("EntraIdApplication", annotation.InitialSnapshot.ResourceType);
+        Assert.Equal(KnownResourceStates.Waiting, annotation.InitialSnapshot.State?.Text);
+        Assert.Empty(annotation.InitialSnapshot.Properties);
     }
 
     [Fact]
@@ -178,7 +304,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithClientCapability("cp1");
 
         using var app = appBuilder.Build();
@@ -196,7 +322,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithAzureRegion("TryAutoDetect");
 
         using var app = appBuilder.Build();
@@ -213,7 +339,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithAllowWebApiToBeAuthorizedByACL();
 
         using var app = appBuilder.Build();
@@ -230,7 +356,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithExtraQueryParameter("dc", "prod-wst-01")
             .WithExtraQueryParameter("slice", "testslice");
 
@@ -250,8 +376,8 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
-            .WithAudience("api://test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
+            .WithAudience($"api://{ClientId}");
 
         using var app = appBuilder.Build();
 
@@ -259,7 +385,7 @@ public class EntraIdResourceBuilderTests
 
         var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
         Assert.Single(resource.Audiences);
-        Assert.Contains("api://test-client-id", resource.Audiences);
+        Assert.Contains($"api://{ClientId}", resource.Audiences);
     }
 
     [Fact]
@@ -268,7 +394,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithFicMsi("mi-client-id");
 
         using var app = appBuilder.Build();
@@ -288,7 +414,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithFicMsi();
 
         using var app = appBuilder.Build();
@@ -308,7 +434,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithManagedCertificate();
 
         using var app = appBuilder.Build();
@@ -329,7 +455,7 @@ public class EntraIdResourceBuilderTests
         var secret = appBuilder.AddParameter("EntraSecret", secret: true);
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithClientSecret(secret)
             .WithFicMsi("mi-client-id");
 
@@ -349,7 +475,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCertificateFromKeyVault("https://myvault.vault.azure.net", "MyCert");
 
         using var app = appBuilder.Build();
@@ -372,10 +498,9 @@ public class EntraIdResourceBuilderTests
         var secret = appBuilder.AddParameter("EntraSecret", "super-secret", secret: true);
 
         var entra = appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithClientSecret(secret)
-            .WithAudience("api://test-client-id")
-            .WithAppHomeTenantId("home-tenant")
+            .WithAudience($"api://{ClientId}")
             .WithClientCapability("cp1")
             .WithAzureRegion("westus2")
             .WithAllowWebApiToBeAuthorizedByACL()
@@ -387,18 +512,96 @@ public class EntraIdResourceBuilderTests
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
 
-        Assert.Equal("https://login.microsoftonline.com/", env["AzureAd__Instance"]);
-        Assert.Equal("test-tenant-id", env["AzureAd__TenantId"]);
-        Assert.Equal("test-client-id", env["AzureAd__ClientId"]);
-        Assert.Equal("home-tenant", env["AzureAd__AppHomeTenantId"]);
-        Assert.Equal("westus2", env["AzureAd__AzureRegion"]);
-        Assert.Equal("ClientSecret", env["AzureAd__ClientCredentials__0__SourceType"]);
-        Assert.Equal("super-secret", env["AzureAd__ClientCredentials__0__ClientSecret"]);
-        Assert.Equal("cp1", env["AzureAd__ClientCapabilities__0"]);
-        Assert.Equal("api://test-client-id", env["AzureAd__Audiences__0"]);
-        Assert.Equal("true", env["AzureAd__AllowWebApiToBeAuthorizedByACL"]);
-        Assert.Equal("prod-wst-01", env["AzureAd__ExtraQueryParameters__dc"]);
-        Assert.DoesNotContain("AzureAd__SendX5C", env.Keys);
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId,
+            ["AzureAd__AzureRegion"] = "westus2",
+            ["AzureAd__ClientCredentials__0__SourceType"] = "ClientSecret",
+            ["AzureAd__ClientCredentials__0__ClientSecret"] = "super-secret",
+            ["AzureAd__ClientCapabilities__0"] = "cp1",
+            ["AzureAd__Audiences__0"] = $"api://{ClientId}",
+            ["AzureAd__AllowWebApiToBeAuthorizedByACL"] = "true",
+            ["AzureAd__ExtraQueryParameters__dc"] = "prod-wst-01"
+        }, env);
+    }
+
+    [Fact]
+    public async Task WithReference_DefaultSignInAudience_EmitsHomeTenantAsTenantId()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+
+        var container = appBuilder.AddContainer("api", "myimage")
+            .WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId
+        }, env);
+    }
+
+    [Theory]
+    [InlineData(EntraIdSignInAudience.AzureADMultipleOrgs, "organizations")]
+    [InlineData(EntraIdSignInAudience.AzureADandPersonalMicrosoftAccount, "common")]
+    [InlineData(EntraIdSignInAudience.PersonalMicrosoftAccount, "consumers")]
+    public async Task WithReference_OtherSignInAudiences_EmitKeywordAndHomeTenant(EntraIdSignInAudience signInAudience, string expectedTenantId)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
+            .WithSignInAudience(signInAudience);
+
+        var container = appBuilder.AddContainer("api", "myimage")
+            .WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+
+        Assert.Equal(signInAudience, entra.Resource.SignInAudience);
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = expectedTenantId,
+            ["AzureAd__AppHomeTenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId
+        }, env);
+    }
+
+    [Fact]
+    public async Task WithReference_OtherSignInAudiences_EmitHomeTenantFromParameter()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var tenantId = appBuilder.AddParameter("EntraTenantId", TenantId);
+        var clientId = appBuilder.AddParameter("EntraApiClientId", ClientId);
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: tenantId, clientId: clientId)
+            .WithSignInAudience(EntraIdSignInAudience.AzureADMultipleOrgs);
+
+        var container = appBuilder.AddContainer("api", "myimage")
+            .WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = "organizations",
+            ["AzureAd__AppHomeTenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId
+        }, env);
     }
 
     [Fact]
@@ -407,7 +610,7 @@ public class EntraIdResourceBuilderTests
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
         var entra = appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithSendX5C();
 
         var container = appBuilder.AddContainer("api", "myimage")
@@ -427,7 +630,7 @@ public class EntraIdResourceBuilderTests
         var password = appBuilder.AddParameter("CertPassword", "p@ssw0rd", secret: true);
 
         var entra = appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCredential(new EntraIdFileCertificateCredential
             {
                 FilePath = "/certs/app.pfx",
@@ -451,7 +654,7 @@ public class EntraIdResourceBuilderTests
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
         var entra = appBuilder.AddEntraIdApplication("entra-api", "AzureAdApi")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         var container = appBuilder.AddContainer("api", "myimage")
             .WithReference(entra);
@@ -459,9 +662,12 @@ public class EntraIdResourceBuilderTests
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
 
-        Assert.Equal("test-tenant-id", env["AzureAdApi__TenantId"]);
-        Assert.Equal("test-client-id", env["AzureAdApi__ClientId"]);
-        Assert.DoesNotContain(env, kvp => kvp.Key.StartsWith("AzureAd__", StringComparison.Ordinal));
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAdApi__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAdApi__TenantId"] = TenantId,
+            ["AzureAdApi__ClientId"] = ClientId
+        }, env);
     }
 
     [Fact]
@@ -470,7 +676,7 @@ public class EntraIdResourceBuilderTests
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
         var entra = appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCertificateThumbprint("CurrentUser/My", "ABC123");
 
         var container = appBuilder.AddContainer("web", "myimage")
@@ -479,10 +685,15 @@ public class EntraIdResourceBuilderTests
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
 
-        Assert.Equal("StoreWithThumbprint", env["AzureAd__ClientCredentials__0__SourceType"]);
-        Assert.Equal("CurrentUser/My", env["AzureAd__ClientCredentials__0__CertificateStorePath"]);
-        Assert.Equal("ABC123", env["AzureAd__ClientCredentials__0__CertificateThumbprint"]);
-        Assert.DoesNotContain("AzureAd__ClientCredentials__0__CertificateDistinguishedName", env.Keys);
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId,
+            ["AzureAd__ClientCredentials__0__SourceType"] = "StoreWithThumbprint",
+            ["AzureAd__ClientCredentials__0__CertificateStorePath"] = "CurrentUser/My",
+            ["AzureAd__ClientCredentials__0__CertificateThumbprint"] = "ABC123"
+        }, env);
     }
 
     [Fact]
@@ -491,7 +702,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCertificateThumbprint("CurrentUser/My", "ABC123");
 
         using var app = appBuilder.Build();
@@ -513,7 +724,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCertificateDistinguishedName("CurrentUser/My", "CN=MyCert");
 
         using var app = appBuilder.Build();
@@ -534,7 +745,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
             .WithCredential(new EntraIdSignedAssertionFileCredential
             {
                 FilePath = "/var/run/secrets/token"
@@ -557,7 +768,7 @@ public class EntraIdResourceBuilderTests
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
         var entra = appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         var project = appBuilder.AddContainer("api", "myimage")
             .WithReference(entra);
@@ -619,7 +830,7 @@ public class EntraIdResourceBuilderTests
         var notSecret = appBuilder.AddParameter("EntraWebClientSecret");
 
         var entra = appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         Assert.Throws<ArgumentException>(() => entra.WithClientSecret(notSecret));
     }
@@ -646,7 +857,7 @@ public class EntraIdResourceBuilderTests
         var appBuilder = DistributedApplication.CreateBuilder();
 
         appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: "test-tenant-id", clientId: "test-client-id");
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         using var app = appBuilder.Build();
 

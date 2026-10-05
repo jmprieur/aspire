@@ -24,7 +24,7 @@ namespace Aspire.Hosting.Azure;
 /// <c>Microsoft.Identity.Abstractions</c>.
 /// </para>
 /// </remarks>
-public class EntraIdApplicationResource : Resource, IResourceWithEnvironment
+public class EntraIdApplicationResource : Resource
 {
     private const string DefaultInstance = "https://login.microsoftonline.com/";
 
@@ -73,16 +73,26 @@ public class EntraIdApplicationResource : Resource, IResourceWithEnvironment
     public string Instance { get; set; } = DefaultInstance;
 
     /// <summary>
-    /// Gets or sets the parameter resource for the tenant ID.
+    /// Gets or sets the parameter resource for the ID of the app's home tenant.
     /// </summary>
+    /// <remarks>
+    /// The home tenant is the directory where the app is registered, shown as "Directory (tenant) ID"
+    /// on the app registration's Overview page.
+    /// </remarks>
     public ParameterResource? TenantIdParameter { get; set; }
 
     /// <summary>
-    /// Gets or sets a fixed tenant ID value.
+    /// Gets or sets a fixed ID of the app's home tenant.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// The home tenant is the directory where the app is registered, shown as "Directory (tenant) ID"
+    /// on the app registration's Overview page. It can be a GUID or a domain such as <c>contoso.onmicrosoft.com</c>.
+    /// </para>
+    /// <para>
     /// When both <see cref="TenantIdParameter"/> and <see cref="TenantId"/> are set,
     /// <see cref="TenantIdParameter"/> takes precedence.
+    /// </para>
     /// </remarks>
     public string? TenantId { get; set; }
 
@@ -100,16 +110,31 @@ public class EntraIdApplicationResource : Resource, IResourceWithEnvironment
     /// </remarks>
     public string? ClientId { get; set; }
 
-    // ── Per-app properties from MicrosoftEntraApplicationOptions ────────
-
     /// <summary>
-    /// Gets or sets the home tenant of the app registration.
+    /// Gets or sets which accounts can sign in to the application.
     /// </summary>
     /// <remarks>
-    /// Useful for multi-tenant apps that acquire tokens on behalf of themselves.
-    /// Also provides a direct path to the Azure Portal app registration.
+    /// Defaults to <see cref="EntraIdSignInAudience.AzureADMyOrg"/>, which allows only accounts in the home tenant.
+    /// The value must match the "Supported account types" setting of the app registration.
     /// </remarks>
-    public string? AppHomeTenantId { get; set; }
+    public EntraIdSignInAudience SignInAudience { get; set; } = EntraIdSignInAudience.AzureADMyOrg;
+
+    /// <summary>
+    /// Gets the keyword that Microsoft.Identity.Web expects as <c>TenantId</c> for <see cref="SignInAudience"/>,
+    /// or <see langword="null"/> when the app is single-tenant and uses its home tenant instead.
+    /// </summary>
+    /// <remarks>
+    /// For more information about the keywords, see
+    /// <a href="https://learn.microsoft.com/entra/identity-platform/v2-protocols#endpoints">Microsoft identity platform endpoints</a>.
+    /// </remarks>
+    internal string? SignInTenantKeyword => SignInAudience switch
+    {
+        EntraIdSignInAudience.AzureADMyOrg => null,
+        EntraIdSignInAudience.AzureADMultipleOrgs => "organizations",
+        EntraIdSignInAudience.AzureADandPersonalMicrosoftAccount => "common",
+        EntraIdSignInAudience.PersonalMicrosoftAccount => "consumers",
+        _ => throw new InvalidOperationException($"'{SignInAudience}' is not a valid {nameof(EntraIdSignInAudience)} value.")
+    };
 
     // ── Token acquisition ──────────────────────────────────────────────────
 
