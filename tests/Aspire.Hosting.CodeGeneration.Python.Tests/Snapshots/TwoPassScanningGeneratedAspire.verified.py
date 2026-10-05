@@ -1,4 +1,4 @@
-#   -------------------------------------------------------------
+﻿#   -------------------------------------------------------------
 #   Copyright (c) Microsoft Corporation. All rights reserved.
 #   Licensed under the MIT License. See LICENSE in project root for information.
 #
@@ -2052,6 +2052,7 @@ class ResourceUrlAnnotation(typing.TypedDict, total=False):
     Url: str
     DisplayText: str | None
     Endpoint: EndpointReference
+    DisplayOrder: int | None
     DisplayLocation: UrlDisplayLocation
 
 class RunConfiguration(typing.TypedDict, total=False):
