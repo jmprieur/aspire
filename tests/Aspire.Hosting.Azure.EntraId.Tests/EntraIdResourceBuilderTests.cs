@@ -33,38 +33,6 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
-    public void AddEntraIdApplication_DefaultConfigSection()
-    {
-        var appBuilder = DistributedApplication.CreateBuilder();
-
-        appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
-
-        using var app = appBuilder.Build();
-
-        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
-
-        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Equal("AzureAd", resource.ConfigSectionName);
-    }
-
-    [Fact]
-    public void AddEntraIdApplication_CustomConfigSection()
-    {
-        var appBuilder = DistributedApplication.CreateBuilder();
-
-        appBuilder.AddEntraIdApplication("entra-api", "AzureAdApi")
-            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
-
-        using var app = appBuilder.Build();
-
-        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
-
-        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Equal("AzureAdApi", resource.ConfigSectionName);
-    }
-
-    [Fact]
     public void AddEntraIdApplication_AsExistingApplicationWithTenantIdParameter()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
@@ -507,7 +475,7 @@ public class EntraIdResourceBuilderTests
             .WithExtraQueryParameter("dc", "prod-wst-01");
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -536,7 +504,7 @@ public class EntraIdResourceBuilderTests
             .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -562,7 +530,7 @@ public class EntraIdResourceBuilderTests
             .WithSignInAudience(signInAudience);
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -590,7 +558,7 @@ public class EntraIdResourceBuilderTests
             .WithSignInAudience(EntraIdSignInAudience.AzureADMultipleOrgs);
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -614,7 +582,7 @@ public class EntraIdResourceBuilderTests
             .WithSendX5C();
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -638,7 +606,7 @@ public class EntraIdResourceBuilderTests
             });
 
         var container = appBuilder.AddContainer("web", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -648,25 +616,317 @@ public class EntraIdResourceBuilderTests
         Assert.Equal("p@ssw0rd", env["AzureAd__ClientCredentials__0__CertificatePassword"]);
     }
 
-    [Fact]
-    public async Task WithReference_UsesCustomConfigSectionNameAsPrefix()
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run, "AzureAdApi")]
+    [InlineData(DistributedApplicationOperation.Publish, "AzureAdApi")]
+    [InlineData(DistributedApplicationOperation.Run, "Authentication__Schemes__AzureAd")]
+    [InlineData(DistributedApplicationOperation.Publish, "Authentication__Schemes__AzureAd")]
+    public async Task WithReference_UsesCustomPrefix(DistributedApplicationOperation operation, string prefix)
     {
         using var appBuilder = TestDistributedApplicationBuilder.Create();
 
-        var entra = appBuilder.AddEntraIdApplication("entra-api", "AzureAdApi")
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
             .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
 
         var container = appBuilder.AddContainer("api", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: prefix, separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
-            container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
+            container.Resource, operation, TestServiceProvider.Instance);
 
         Assert.Equal(new Dictionary<string, string>
         {
-            ["AzureAdApi__Instance"] = "https://login.microsoftonline.com/",
-            ["AzureAdApi__TenantId"] = TenantId,
-            ["AzureAdApi__ClientId"] = ClientId
+            [$"{prefix}__Instance"] = "https://login.microsoftonline.com/",
+            [$"{prefix}__TenantId"] = TenantId,
+            [$"{prefix}__ClientId"] = ClientId
+        }, env);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run)]
+    [InlineData(DistributedApplicationOperation.Publish)]
+    public async Task WithReference_DotnetProgramPrefersMicrosoftIdentityWebDefaults(DistributedApplicationOperation operation)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        var project = appBuilder.AddResource(new ProjectResource("api"));
+
+        IResourceBuilder<ProjectResource> result = project.WithReference(entra);
+        Assert.Same(project, result);
+        var explicitNull = appBuilder.AddResource(new ProjectResource("explicit-null"))
+            .WithReference(entra, configSectionName: null);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource, operation, TestServiceProvider.Instance);
+
+        var expected = new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId
+        };
+
+        Assert.Equal(expected, env);
+        Assert.Equal(expected, await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            explicitNull.Resource, operation, TestServiceProvider.Instance));
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run, "AzureAdApi", "AzureAdApi")]
+    [InlineData(DistributedApplicationOperation.Publish, "AzureAdApi", "AzureAdApi")]
+    [InlineData(DistributedApplicationOperation.Run, "Authentication:AzureAd", "Authentication__AzureAd")]
+    [InlineData(DistributedApplicationOperation.Publish, "Authentication:AzureAd", "Authentication__AzureAd")]
+    [InlineData(DistributedApplicationOperation.Run, "Authentication:Providers:Entra", "Authentication__Providers__Entra")]
+    [InlineData(DistributedApplicationOperation.Publish, "Authentication:Providers:Entra", "Authentication__Providers__Entra")]
+    public async Task WithReference_DotnetProgramUsesCustomConfigSection(DistributedApplicationOperation operation, string configSectionName, string expectedPrefix)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        var named = appBuilder.AddResource(new ProjectResource("named"))
+            .WithReference(entra, configSectionName: configSectionName);
+        var positional = appBuilder.AddResource(new ProjectResource("positional"))
+            .WithReference(entra, configSectionName);
+
+        var expected = new Dictionary<string, string>
+        {
+            [$"{expectedPrefix}__Instance"] = "https://login.microsoftonline.com/",
+            [$"{expectedPrefix}__TenantId"] = TenantId,
+            [$"{expectedPrefix}__ClientId"] = ClientId
+        };
+
+        Assert.Equal(expected, await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            named.Resource, operation, TestServiceProvider.Instance));
+        Assert.Equal(expected, await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            positional.Resource, operation, TestServiceProvider.Instance));
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run)]
+    [InlineData(DistributedApplicationOperation.Publish)]
+    public async Task WithReference_DotnetProgramCanExplicitlySelectGeneralOverload(DistributedApplicationOperation operation)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        var project = appBuilder.AddResource(new ProjectResource("api"))
+            .WithReference(entra, prefix: "AUTH");
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource, operation, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AUTH_Instance"] = "https://login.microsoftonline.com/",
+            ["AUTH_TenantId"] = TenantId,
+            ["AUTH_ClientId"] = ClientId
+        }, env);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run, "entra", "ENTRA")]
+    [InlineData(DistributedApplicationOperation.Publish, "entra", "ENTRA")]
+    [InlineData(DistributedApplicationOperation.Run, "entra-api", "ENTRA_API")]
+    [InlineData(DistributedApplicationOperation.Publish, "entra-api", "ENTRA_API")]
+    public async Task WithReference_OtherResourcesUsePortableResourceNamePrefix(DistributedApplicationOperation operation, string resourceName, string expectedPrefix)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication(resourceName)
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        var container = appBuilder.AddContainer("worker", "myimage")
+            .WithReference(entra);
+        var explicitNull = appBuilder.AddContainer("explicit-null", "myimage")
+            .WithReference(entra, prefix: null, separator: null);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, operation, TestServiceProvider.Instance);
+
+        var expected = new Dictionary<string, string>
+        {
+            [$"{expectedPrefix}_Instance"] = "https://login.microsoftonline.com/",
+            [$"{expectedPrefix}_TenantId"] = TenantId,
+            [$"{expectedPrefix}_ClientId"] = ClientId
+        };
+
+        Assert.Equal(expected, env);
+        Assert.Equal(expected, await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            explicitNull.Resource, operation, TestServiceProvider.Instance));
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run)]
+    [InlineData(DistributedApplicationOperation.Publish)]
+    public async Task WithReference_UsesCompileTimeResourceType(DistributedApplicationOperation operation)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        IResourceBuilder<IResourceWithEnvironment> project = appBuilder.AddResource(new ProjectResource("api"));
+        project.WithReference(entra);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            project.Resource, operation, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["ENTRA_API_Instance"] = "https://login.microsoftonline.com/",
+            ["ENTRA_API_TenantId"] = TenantId,
+            ["ENTRA_API_ClientId"] = ClientId
+        }, env);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run)]
+    [InlineData(DistributedApplicationOperation.Publish)]
+    public async Task WithReference_PrefixAndSeparatorAreSpecificToEachConsumer(DistributedApplicationOperation operation)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+
+        var defaultConsumer = appBuilder.AddResource(new ProjectResource("api"))
+            .WithReference(entra);
+
+        var customConsumer = appBuilder.AddContainer("worker", "myimage");
+        Assert.Same(customConsumer, customConsumer.WithReference(entra, prefix: "ENTRA", separator: "_"));
+
+        var defaultEnv = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            defaultConsumer.Resource, operation, TestServiceProvider.Instance);
+        var customEnv = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            customConsumer.Resource, operation, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__TenantId"] = TenantId,
+            ["AzureAd__ClientId"] = ClientId
+        }, defaultEnv);
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["ENTRA_Instance"] = "https://login.microsoftonline.com/",
+            ["ENTRA_TenantId"] = TenantId,
+            ["ENTRA_ClientId"] = ClientId
+        }, customEnv);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run, "__")]
+    [InlineData(DistributedApplicationOperation.Publish, "__")]
+    [InlineData(DistributedApplicationOperation.Run, "_")]
+    [InlineData(DistributedApplicationOperation.Publish, "_")]
+    [InlineData(DistributedApplicationOperation.Run, "--")]
+    [InlineData(DistributedApplicationOperation.Publish, "--")]
+    [InlineData(DistributedApplicationOperation.Run, "")]
+    [InlineData(DistributedApplicationOperation.Publish, "")]
+    public async Task WithReference_UsesSeparatorThroughoutAllSettings(DistributedApplicationOperation operation, string separator)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var secret = appBuilder.AddParameter("EntraSecret", "super-secret", secret: true);
+        var password = appBuilder.AddParameter("CertPassword", "certificate-password", secret: true);
+        var tenantId = appBuilder.AddParameter("EntraTenantId", TenantId);
+        var clientId = appBuilder.AddParameter("EntraClientId", ClientId);
+
+        var entra = appBuilder.AddEntraIdApplication("entra-web")
+            .AsExistingApplication(tenantId, clientId)
+            .WithSignInAudience(EntraIdSignInAudience.AzureADMultipleOrgs)
+            .WithClientSecret(secret)
+            .WithCredential(new EntraIdFederatedIdentityCredential
+            {
+                ManagedIdentityClientId = ClientId,
+                TokenExchangeUrl = "api://CustomTokenExchange",
+                TokenExchangeAuthority = "https://login.microsoftonline.com/"
+            })
+            .WithCertificateFromKeyVault("https://myvault.vault.azure.net", "MyCert")
+            .WithCertificateThumbprint("CurrentUser/My", "ABC123")
+            .WithCertificateDistinguishedName("CurrentUser/My", "CN=MyCert")
+            .WithCredential(new EntraIdFileCertificateCredential
+            {
+                FilePath = "/certs/app.pfx",
+                Password = password.Resource
+            })
+            .WithCredential(new EntraIdSignedAssertionFileCredential { FilePath = "/var/run/secrets/token" })
+            .WithCredential(new EntraIdManagedCertificateCredential())
+            .WithSendX5C()
+            .WithAzureRegion("westus2")
+            .WithClientCapability("cp1")
+            .WithClientCapability("cp2")
+            .WithAudience($"api://{ClientId}")
+            .WithAudience("api://another-api")
+            .WithAllowWebApiToBeAuthorizedByACL()
+            .WithExtraQueryParameter("dc", "prod-wst-01");
+
+        var container = appBuilder.AddContainer("web", "myimage")
+            .WithReference(entra, prefix: "ENTRA", separator: separator);
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, operation, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            [$"ENTRA{separator}Instance"] = "https://login.microsoftonline.com/",
+            [$"ENTRA{separator}TenantId"] = "organizations",
+            [$"ENTRA{separator}AppHomeTenantId"] = operation == DistributedApplicationOperation.Run ? TenantId : "{EntraTenantId.value}",
+            [$"ENTRA{separator}ClientId"] = operation == DistributedApplicationOperation.Run ? ClientId : "{EntraClientId.value}",
+            [$"ENTRA{separator}SendX5C"] = "true",
+            [$"ENTRA{separator}AzureRegion"] = "westus2",
+            [$"ENTRA{separator}ClientCredentials{separator}0{separator}SourceType"] = "ClientSecret",
+            [$"ENTRA{separator}ClientCredentials{separator}0{separator}ClientSecret"] = operation == DistributedApplicationOperation.Run ? "super-secret" : "{EntraSecret.value}",
+            [$"ENTRA{separator}ClientCredentials{separator}1{separator}SourceType"] = "SignedAssertionFromManagedIdentity",
+            [$"ENTRA{separator}ClientCredentials{separator}1{separator}ManagedIdentityClientId"] = ClientId,
+            [$"ENTRA{separator}ClientCredentials{separator}1{separator}TokenExchangeUrl"] = "api://CustomTokenExchange",
+            [$"ENTRA{separator}ClientCredentials{separator}1{separator}TokenExchangeAuthority"] = "https://login.microsoftonline.com/",
+            [$"ENTRA{separator}ClientCredentials{separator}2{separator}SourceType"] = "KeyVault",
+            [$"ENTRA{separator}ClientCredentials{separator}2{separator}KeyVaultUrl"] = "https://myvault.vault.azure.net",
+            [$"ENTRA{separator}ClientCredentials{separator}2{separator}KeyVaultCertificateName"] = "MyCert",
+            [$"ENTRA{separator}ClientCredentials{separator}3{separator}SourceType"] = "StoreWithThumbprint",
+            [$"ENTRA{separator}ClientCredentials{separator}3{separator}CertificateStorePath"] = "CurrentUser/My",
+            [$"ENTRA{separator}ClientCredentials{separator}3{separator}CertificateThumbprint"] = "ABC123",
+            [$"ENTRA{separator}ClientCredentials{separator}4{separator}SourceType"] = "StoreWithDistinguishedName",
+            [$"ENTRA{separator}ClientCredentials{separator}4{separator}CertificateStorePath"] = "CurrentUser/My",
+            [$"ENTRA{separator}ClientCredentials{separator}4{separator}CertificateDistinguishedName"] = "CN=MyCert",
+            [$"ENTRA{separator}ClientCredentials{separator}5{separator}SourceType"] = "Path",
+            [$"ENTRA{separator}ClientCredentials{separator}5{separator}CertificateDiskPath"] = "/certs/app.pfx",
+            [$"ENTRA{separator}ClientCredentials{separator}5{separator}CertificatePassword"] = operation == DistributedApplicationOperation.Run ? "certificate-password" : "{CertPassword.value}",
+            [$"ENTRA{separator}ClientCredentials{separator}6{separator}SourceType"] = "SignedAssertionFilePath",
+            [$"ENTRA{separator}ClientCredentials{separator}6{separator}SignedAssertionFileDiskPath"] = "/var/run/secrets/token",
+            [$"ENTRA{separator}ClientCredentials{separator}7{separator}SourceType"] = "ManagedCertificate",
+            [$"ENTRA{separator}ClientCapabilities{separator}0"] = "cp1",
+            [$"ENTRA{separator}ClientCapabilities{separator}1"] = "cp2",
+            [$"ENTRA{separator}Audiences{separator}0"] = $"api://{ClientId}",
+            [$"ENTRA{separator}Audiences{separator}1"] = "api://another-api",
+            [$"ENTRA{separator}AllowWebApiToBeAuthorizedByACL"] = "true",
+            [$"ENTRA{separator}ExtraQueryParameters{separator}dc"] = "prod-wst-01"
+        }, env);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run)]
+    [InlineData(DistributedApplicationOperation.Publish)]
+    public async Task WithReference_UsesCustomSeparatorWithResourceNamePrefix(DistributedApplicationOperation operation)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+
+        var entra = appBuilder.AddEntraIdApplication("entra-api")
+            .AsExistingApplication(tenantId: TenantId, clientId: ClientId);
+        var container = appBuilder.AddContainer("api", "myimage")
+            .WithReference(entra, separator: "--");
+
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            container.Resource, operation, TestServiceProvider.Instance);
+
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["ENTRA_API--Instance"] = "https://login.microsoftonline.com/",
+            ["ENTRA_API--TenantId"] = TenantId,
+            ["ENTRA_API--ClientId"] = ClientId
         }, env);
     }
 
@@ -680,7 +940,7 @@ public class EntraIdResourceBuilderTests
             .WithCertificateThumbprint("CurrentUser/My", "ABC123");
 
         var container = appBuilder.AddContainer("web", "myimage")
-            .WithReference(entra);
+            .WithReference(entra, prefix: "AzureAd", separator: "__");
 
         var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
             container.Resource, DistributedApplicationOperation.Run, TestServiceProvider.Instance);
@@ -836,19 +1096,57 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
-    public void EntraIdApplicationResource_ThrowsWhenConfigSectionNameIsEmpty()
+    public void EntraIdApplicationResource_CreatesResource()
     {
-        Assert.Throws<ArgumentException>(() => new EntraIdApplicationResource("entra-api", string.Empty));
-        Assert.Throws<ArgumentNullException>(() => new EntraIdApplicationResource("entra-api", null!));
+        var resource = new EntraIdApplicationResource("entra-api");
+
+        Assert.Equal("entra-api", resource.Name);
     }
 
     [Fact]
-    public void AddEntraIdApplication_ThrowsWhenConfigSectionNameIsEmpty()
+    public void WithReference_ThrowsWhenPrefixIsEmpty()
     {
-        var appBuilder = DistributedApplication.CreateBuilder();
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+        var container = appBuilder.AddContainer("api", "myimage");
 
-        Assert.Throws<ArgumentException>(() =>
-            appBuilder.AddEntraIdApplication("entra-api", string.Empty));
+        var exception = Assert.ThrowsAny<ArgumentException>(() =>
+            container.WithReference(entra, prefix: ""));
+
+        Assert.Equal("prefix", exception.ParamName);
+    }
+
+    [Fact]
+    public void WithReference_ThrowsWhenDotnetConfigSectionIsEmpty()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+        var project = appBuilder.AddResource(new ProjectResource("api"));
+
+        var exception = Assert.ThrowsAny<ArgumentException>(() =>
+            project.WithReference(entra, configSectionName: ""));
+
+        Assert.Equal("configSectionName", exception.ParamName);
+    }
+
+    [Fact]
+    public void WithReference_ThrowsWhenSourceIsNull()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var container = appBuilder.AddContainer("api", "myimage");
+
+        Assert.Throws<ArgumentNullException>(() =>
+            container.WithReference(source: null!, prefix: "AzureAd"));
+    }
+
+    [Fact]
+    public void WithReference_ThrowsWhenBuilderIsNull()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var entra = appBuilder.AddEntraIdApplication("entra-api");
+
+        Assert.Throws<ArgumentNullException>(() =>
+            EntraIdResourceExtensions.WithReference<ContainerResource>(null!, entra));
     }
 
     [Fact]

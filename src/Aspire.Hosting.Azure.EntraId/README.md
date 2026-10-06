@@ -35,16 +35,42 @@ var api = builder.AddProject<Projects.Api>("api")
 
 Pass the **Directory (tenant) ID** and **Application (client) ID** shown on the app registration's **Overview** page. When the parameters have no value, the dashboard prompts for them.
 
-`WithReference` injects environment variables in the form `AzureAd__{Key}` — for example `AzureAd__Instance`, `AzureAd__TenantId`, and `AzureAd__ClientId`. .NET's configuration system maps these to the `AzureAd` configuration section, so the referencing resource reads them as ordinary configuration with no glue code.
+For .NET program resources, `WithReference` injects environment variables in the form `AzureAd__{Key}` — for example `AzureAd__Instance`, `AzureAd__TenantId`, and `AzureAd__ClientId`. .NET's configuration system maps these to the `AzureAd` configuration section, so the referencing resource reads them as ordinary configuration with no glue code.
 
 When the AppHost starts, the Entra ID resource validates its IDs, instance, and credentials, then reports **Running** and shows links to the app registration and its OpenID Connect discovery document in the dashboard. If a setting is invalid, the resource fails to start and its console logs explain why. `WaitFor` keeps the referencing resource from starting with invalid settings.
 
-To inject into a different configuration section, pass the section name when adding the resource:
+### Custom environment variable names
+
+The .NET program overload is preferred automatically and uses `"AzureAd"` with `"__"` separators.
+For a different .NET configuration section, set `configSectionName`. Colons in nested section paths are converted
+to double underscores; for example, `"Authentication:AzureAd"` produces `Authentication__AzureAd__ClientId`:
 
 ```csharp
-var entraApi = builder.AddEntraIdApplication("entra-api", "AzureAdApi")
-                      .AsExistingApplication(tenantId: tenantId, clientId: apiClientId);
+var customApi = builder.AddProject<Projects.Api>("custom-api")
+                       .WithReference(entraApi, configSectionName: "AzureAdApi")
+                       .WaitFor(entraApi);
 ```
+
+Other resources use the registration resource's name, encoded as a portable environment variable name and uppercased,
+with `"_"` separators. For example, referencing `"entra-api"` produces `ENTRA_API_TenantId` and `ENTRA_API_ClientId`.
+Set the optional `prefix` and `separator` to override these defaults:
+
+```csharp
+var worker = builder.AddContainer("worker", "my-worker-image")
+                    .WithReference(entraApi, prefix: "ENTRA", separator: "_")
+                    .WaitFor(entraApi);
+```
+
+This produces names such as `ENTRA_TenantId` and `ENTRA_ClientId`. The separator applies throughout nested settings
+and arrays, for example `ENTRA_ClientCredentials_0_SourceType` when a credential is configured. An empty separator
+concatenates keys directly, producing names such as `ENTRAClientId` and `ENTRAClientCredentials0SourceType`. Property names and
+casing are preserved. Each consumer chooses its own prefix and separator without affecting other references to the
+same registration. Non-.NET applications read these variables and map the values into their authentication library's
+options; the integration does not automatically configure those libraries.
+
+.NET programs can explicitly select the general overload by specifying `prefix` or `separator`. Containers, including
+containers running .NET code, use the general overload; specify `prefix: "AzureAd", separator: "__"` to get
+Microsoft.Identity.Web-compatible names. Overload selection uses the builder's compile-time resource type.
 
 ## Sign-in audiences
 

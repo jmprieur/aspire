@@ -41,8 +41,7 @@ public class EntraIdInitializationTests
             new("entra.tenant.id", TenantId) { DisplayName = "Tenant ID", IsHighlighted = true, SortOrder = 0 },
             new("entra.client.id", ClientId) { DisplayName = "Client ID", IsHighlighted = true, SortOrder = 1 },
             new("entra.signin.audience", "AzureADMyOrg") { DisplayName = "Sign-in audience", IsHighlighted = true, SortOrder = 2 },
-            new("entra.instance", "https://login.microsoftonline.com/") { DisplayName = "Instance", IsHighlighted = true, SortOrder = 3 },
-            new("entra.config.section", "AzureAd") { DisplayName = "Configuration section", IsHighlighted = true, SortOrder = 4 }
+            new("entra.instance", "https://login.microsoftonline.com/") { DisplayName = "Instance", IsHighlighted = true, SortOrder = 3 }
         }, snapshot.Properties);
     }
 
@@ -64,7 +63,7 @@ public class EntraIdInitializationTests
             {
                 DisplayName = "Credentials",
                 IsHighlighted = true,
-                SortOrder = 5
+                SortOrder = 4
             },
             Assert.Single(snapshot.Properties, p => p.Name == "entra.credentials"));
     }
@@ -268,7 +267,7 @@ public class EntraIdInitializationTests
         Assert.Equal(KnownResourceStates.Running, snapshot.State?.Text);
         Assert.Equal(new[] { "docs", "OpenID Config", "Azure Portal" }, snapshot.Urls.Select(u => u.Name));
         Assert.Equal(
-            new[] { "custom", "entra.tenant.id", "entra.client.id", "entra.signin.audience", "entra.instance", "entra.config.section" },
+            new[] { "custom", "entra.tenant.id", "entra.client.id", "entra.signin.audience", "entra.instance" },
             snapshot.Properties.Select(p => p.Name));
     }
 

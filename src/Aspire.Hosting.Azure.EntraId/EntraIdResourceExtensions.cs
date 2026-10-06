@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure;
 using Microsoft.Extensions.Logging;
@@ -23,7 +24,7 @@ public static class EntraIdResourceExtensions
     /// <remarks>
     /// <para>
     /// The Entra ID application resource injects configuration as environment variables
-    /// into consuming services. The variables map to the <c>AzureAd</c> configuration section
+    /// into consuming services. For .NET programs, the variables default to the <c>AzureAd</c> configuration section
     /// that Microsoft.Identity.Web reads natively.
     /// </para>
     /// <example>
@@ -48,26 +49,6 @@ public static class EntraIdResourceExtensions
         ArgumentException.ThrowIfNullOrEmpty(name);
 
         var resource = new EntraIdApplicationResource(name);
-        return ConfigureEntraIdResource(builder.AddResource(resource));
-    }
-
-    /// <summary>
-    /// Adds a Microsoft Entra ID application registration resource with a custom configuration section name.
-    /// </summary>
-    /// <param name="builder">The <see cref="IDistributedApplicationBuilder"/>.</param>
-    /// <param name="name">The name of the resource.</param>
-    /// <param name="configSectionName">The configuration section name (e.g., <c>"AzureAd"</c>, <c>"AzureAdApi"</c>).</param>
-    /// <returns>A reference to the <see cref="IResourceBuilder{EntraIdApplicationResource}"/>.</returns>
-    public static IResourceBuilder<EntraIdApplicationResource> AddEntraIdApplication(
-        this IDistributedApplicationBuilder builder,
-        [ResourceName] string name,
-        string configSectionName)
-    {
-        ArgumentNullException.ThrowIfNull(builder);
-        ArgumentException.ThrowIfNullOrEmpty(name);
-        ArgumentException.ThrowIfNullOrEmpty(configSectionName);
-
-        var resource = new EntraIdApplicationResource(name, configSectionName);
         return ConfigureEntraIdResource(builder.AddResource(resource));
     }
 
@@ -178,12 +159,10 @@ public static class EntraIdResourceExtensions
         properties.Add(CreateHighlightedProperty("entra.client.id", "Client ID", clientId, isSensitive: resource.ClientIdParameter?.Secret ?? false, sortOrder: 1));
         properties.Add(CreateHighlightedProperty("entra.signin.audience", "Sign-in audience", resource.SignInAudience.ToString(), isSensitive: false, sortOrder: 2));
         properties.Add(CreateHighlightedProperty("entra.instance", "Instance", resource.Instance, isSensitive: false, sortOrder: 3));
-        properties.Add(CreateHighlightedProperty("entra.config.section", "Configuration section", resource.ConfigSectionName, isSensitive: false, sortOrder: 4));
-
         if (resource.ClientCredentials.Count > 0)
         {
             var sourceTypes = string.Join(", ", resource.ClientCredentials.Select(c => c.SourceType));
-            properties.Add(CreateHighlightedProperty("entra.credentials", "Credentials", sourceTypes, isSensitive: false, sortOrder: 5));
+            properties.Add(CreateHighlightedProperty("entra.credentials", "Credentials", sourceTypes, isSensitive: false, sortOrder: 4));
         }
 
         // Append rather than replace, so URLs and properties that the orchestrator already published, such as ones added
@@ -719,18 +698,17 @@ public static class EntraIdResourceExtensions
     }
 
     /// <summary>
-    /// Injects Entra ID authentication configuration into a consuming service as environment
-    /// variables that map to the Microsoft.Identity.Web configuration section.
+    /// Injects Entra ID authentication configuration into a .NET program using Microsoft.Identity.Web configuration names.
     /// </summary>
     /// <typeparam name="T">The type of the destination resource.</typeparam>
     /// <param name="builder">The resource that will receive the authentication configuration.</param>
     /// <param name="source">The Entra ID application resource to reference.</param>
+    /// <param name="configSectionName">The configuration section name used as the environment variable prefix, with <c>:</c> replaced by <c>__</c>. When <see langword="null"/>, uses <c>"AzureAd"</c>.</param>
     /// <returns>The resource builder for chaining.</returns>
     /// <remarks>
     /// <para>
-    /// This method injects environment variables in the format <c>{ConfigSectionName}__{Key}</c>
-    /// (e.g., <c>AzureAd__TenantId</c>, <c>AzureAd__ClientId</c>) which .NET's configuration
-    /// system automatically maps to hierarchical configuration sections.
+    /// The default names, such as <c>AzureAd__TenantId</c> and <c>AzureAd__ClientId</c>, map to the
+    /// <c>AzureAd</c> configuration section in .NET and are compatible with Microsoft.Identity.Web.
     /// </para>
     /// <para>
     /// The consuming service can then use Microsoft.Identity.Web's standard configuration:
@@ -751,16 +729,69 @@ public static class EntraIdResourceExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    // The marker selects .NET defaults without making Entra references experimental.
+#pragma warning disable ASPIREPROJECTS001
+    [OverloadResolutionPriority(1)]
     public static IResourceBuilder<T> WithReference<T>(
         this IResourceBuilder<T> builder,
-        IResourceBuilder<EntraIdApplicationResource> source)
+        IResourceBuilder<EntraIdApplicationResource> source,
+        string? configSectionName = null)
+        where T : IResourceWithEnvironment, IDotnetProgramResource
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(source);
+        configSectionName ??= "AzureAd";
+        ArgumentException.ThrowIfNullOrEmpty(configSectionName);
+
+        return WithReferenceCore(builder, source, configSectionName.Replace(":", "__", StringComparison.Ordinal), "__");
+    }
+#pragma warning restore ASPIREPROJECTS001
+
+    /// <summary>
+    /// Injects Entra ID authentication configuration into a consuming resource using configurable environment variable names.
+    /// </summary>
+    /// <typeparam name="T">The type of the destination resource.</typeparam>
+    /// <param name="builder">The resource that will receive the authentication configuration.</param>
+    /// <param name="source">The Entra ID application resource to reference.</param>
+    /// <param name="prefix">
+    /// The environment variable prefix. When <see langword="null"/>, uses the source resource's name encoded as a portable environment variable name and uppercased.
+    /// For example, <c>"entra-api"</c> becomes <c>"ENTRA_API"</c>.
+    /// </param>
+    /// <param name="separator">The separator between configuration keys, including nested keys and array indexes. Can be empty to concatenate keys without separators. When <see langword="null"/>, uses <c>"_"</c>.</param>
+    /// <returns>The resource builder for chaining.</returns>
+    /// <remarks>
+    /// Property names and casing are preserved. Applications map the values into their authentication library's options.
+    /// </remarks>
+    /// <example>
+    /// <code lang="csharp">
+    /// builder.AddContainer("worker", "my-worker-image")
+    ///     .WithReference(entra, prefix: "AUTH", separator: "_");
+    /// </code>
+    /// </example>
+    public static IResourceBuilder<T> WithReference<T>(
+        this IResourceBuilder<T> builder,
+        IResourceBuilder<EntraIdApplicationResource> source,
+        string? prefix = null,
+        string? separator = null)
         where T : IResourceWithEnvironment
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(source);
+        prefix ??= EnvironmentVariableNameEncoder.Encode(source.Resource.Name).ToUpperInvariant();
+        separator ??= "_";
+        ArgumentException.ThrowIfNullOrEmpty(prefix);
 
+        return WithReferenceCore(builder, source, prefix, separator);
+    }
+
+    private static IResourceBuilder<T> WithReferenceCore<T>(
+        IResourceBuilder<T> builder,
+        IResourceBuilder<EntraIdApplicationResource> source,
+        string prefix,
+        string separator)
+        where T : IResourceWithEnvironment
+    {
         var entra = source.Resource;
-        var prefix = entra.ConfigSectionName;
 
         // Create a reference relationship so the dashboard shows the connection
         builder.WithReferenceRelationship(entra);
@@ -768,7 +799,7 @@ public static class EntraIdResourceExtensions
         builder.WithEnvironment(context =>
         {
             // Core identity properties
-            context.EnvironmentVariables[$"{prefix}__Instance"] = entra.Instance;
+            context.EnvironmentVariables[$"{prefix}{separator}Instance"] = entra.Instance;
 
             // Microsoft.Identity.Web builds the sign-in authority from Instance and TenantId, so TenantId decides who can
             // sign in. Audiences beyond the home tenant need a keyword such as "organizations" there, but a keyword can't
@@ -778,69 +809,69 @@ public static class EntraIdResourceExtensions
             object? homeTenantId = (object?)entra.TenantIdParameter ?? entra.TenantId;
             if (entra.SignInTenantKeyword is { } signInTenantKeyword)
             {
-                context.EnvironmentVariables[$"{prefix}__TenantId"] = signInTenantKeyword;
+                context.EnvironmentVariables[$"{prefix}{separator}TenantId"] = signInTenantKeyword;
 
                 if (homeTenantId is not null)
                 {
-                    context.EnvironmentVariables[$"{prefix}__AppHomeTenantId"] = homeTenantId;
+                    context.EnvironmentVariables[$"{prefix}{separator}AppHomeTenantId"] = homeTenantId;
                 }
             }
             else if (homeTenantId is not null)
             {
-                context.EnvironmentVariables[$"{prefix}__TenantId"] = homeTenantId;
+                context.EnvironmentVariables[$"{prefix}{separator}TenantId"] = homeTenantId;
             }
 
             if (entra.ClientIdParameter is not null)
             {
-                context.EnvironmentVariables[$"{prefix}__ClientId"] = entra.ClientIdParameter;
+                context.EnvironmentVariables[$"{prefix}{separator}ClientId"] = entra.ClientIdParameter;
             }
             else if (entra.ClientId is not null)
             {
-                context.EnvironmentVariables[$"{prefix}__ClientId"] = entra.ClientId;
+                context.EnvironmentVariables[$"{prefix}{separator}ClientId"] = entra.ClientId;
             }
 
             // Send the x5c claim only when explicitly requested. It enables certificate rollover but
             // is only meaningful for certificate credentials, so it is opt-in via WithSendX5C().
             if (entra.SendX5C)
             {
-                context.EnvironmentVariables[$"{prefix}__SendX5C"] = "true";
+                context.EnvironmentVariables[$"{prefix}{separator}SendX5C"] = "true";
             }
 
             // Token acquisition
             if (entra.AzureRegion is not null)
             {
-                context.EnvironmentVariables[$"{prefix}__AzureRegion"] = entra.AzureRegion;
+                context.EnvironmentVariables[$"{prefix}{separator}AzureRegion"] = entra.AzureRegion;
             }
 
             // Client credentials — each type emits its own env vars
             for (var i = 0; i < entra.ClientCredentials.Count; i++)
             {
-                var credPrefix = $"{prefix}__ClientCredentials__{i}";
-                entra.ClientCredentials[i].EmitEnvironmentVariables(context.EnvironmentVariables, credPrefix);
+                var credPrefix = $"{prefix}{separator}ClientCredentials{separator}{i}";
+                entra.ClientCredentials[i].EmitEnvironmentVariables(context.EnvironmentVariables, credPrefix, separator);
             }
 
             // Client capabilities (e.g., "cp1" for CAE)
             for (var i = 0; i < entra.ClientCapabilities.Count; i++)
             {
-                context.EnvironmentVariables[$"{prefix}__ClientCapabilities__{i}"] = entra.ClientCapabilities[i];
+                context.EnvironmentVariables[$"{prefix}{separator}ClientCapabilities{separator}{i}"] = entra.ClientCapabilities[i];
             }
 
             // Audiences
             for (var i = 0; i < entra.Audiences.Count; i++)
             {
-                context.EnvironmentVariables[$"{prefix}__Audiences__{i}"] = entra.Audiences[i];
+                context.EnvironmentVariables[$"{prefix}{separator}Audiences{separator}{i}"] = entra.Audiences[i];
             }
 
             // Web API authorization
             if (entra.AllowWebApiToBeAuthorizedByACL)
             {
-                context.EnvironmentVariables[$"{prefix}__AllowWebApiToBeAuthorizedByACL"] = "true";
+                context.EnvironmentVariables[$"{prefix}{separator}AllowWebApiToBeAuthorizedByACL"] = "true";
             }
 
             // Extra query parameters
             foreach (var kvp in entra.ExtraQueryParameters)
             {
-                context.EnvironmentVariables[$"{prefix}__ExtraQueryParameters__{kvp.Key}"] = kvp.Value;
+                context.EnvironmentVariables[$"{prefix}{separator}ExtraQueryParameters{separator}{kvp.Key}"] = kvp.Value;
             }
         });
 
