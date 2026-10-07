@@ -41,36 +41,36 @@ When the AppHost starts, the Entra ID resource validates its IDs, instance, and 
 
 ### Custom environment variable names
 
-The .NET program overload is preferred automatically and uses `"AzureAd"` with `"__"` separators.
-For a different .NET configuration section, set `configSectionName`. Colons in nested section paths are converted
+`WithReference` automatically uses `"AzureAd"` with `"__"` separators for .NET program resources.
+For a different .NET configuration section, set `connectionName`. Colons in nested section paths are converted
 to double underscores; for example, `"Authentication:AzureAd"` produces `Authentication__AzureAd__ClientId`:
 
 ```csharp
 var customApi = builder.AddProject<Projects.Api>("custom-api")
-                       .WithReference(entraApi, configSectionName: "AzureAdApi")
+                       .WithReference(entraApi, connectionName: "AzureAdApi")
                        .WaitFor(entraApi);
 ```
 
-Other resources use the registration resource's name, encoded as a portable environment variable name and uppercased,
-with `"_"` separators. For example, referencing `"entra-api"` produces `ENTRA_API_TenantId` and `ENTRA_API_ClientId`.
-Set the optional `prefix` and `separator` to override these defaults:
+Other resources use portable uppercase snake-case names with `"_"` separators, including the registration resource's
+name and each configuration key. For example, referencing `"entra-api"` produces `ENTRA_API_TENANT_ID` and `ENTRA_API_CLIENT_ID`.
+Set the optional `connectionName` to override the prefix:
 
 ```csharp
 var worker = builder.AddContainer("worker", "my-worker-image")
-                    .WithReference(entraApi, prefix: "ENTRA", separator: "_")
+                    .WithReference(entraApi, connectionName: "ENTRA")
                     .WaitFor(entraApi);
 ```
 
-This produces names such as `ENTRA_TenantId` and `ENTRA_ClientId`. The separator applies throughout nested settings
-and arrays, for example `ENTRA_ClientCredentials_0_SourceType` when a credential is configured. An empty separator
-concatenates keys directly, producing names such as `ENTRAClientId` and `ENTRAClientCredentials0SourceType`. Property names and
-casing are preserved. Each consumer chooses its own prefix and separator without affecting other references to the
+This produces names such as `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID`. The naming convention applies throughout nested settings
+and arrays, for example `ENTRA_CLIENT_CREDENTIALS_0_SOURCE_TYPE` when a credential is configured.
+Custom connection names are normalized too: `"MyAuth"` produces `MY_AUTH_CLIENT_ID`.
+An empty connection name omits both the prefix and its separator: `.WithReference(entraApi, connectionName: "")` produces `CLIENT_ID`
+and `CLIENT_CREDENTIALS_0_CLIENT_SECRET`, without a leading underscore. The separator still applies between nested keys
+and array indexes. For .NET program resources, the equivalent credential name is `ClientCredentials__0__ClientSecret`.
+The .NET naming convention is unchanged, and configuration values retain their original casing for all consumers.
+Each consumer chooses its own connection name without affecting other references to the
 same registration. Non-.NET applications read these variables and map the values into their authentication library's
 options; the integration does not automatically configure those libraries.
-
-.NET programs can explicitly select the general overload by specifying `prefix` or `separator`. Containers, including
-containers running .NET code, use the general overload; specify `prefix: "AzureAd", separator: "__"` to get
-Microsoft.Identity.Web-compatible names. Overload selection uses the builder's compile-time resource type.
 
 ## Sign-in audiences
 

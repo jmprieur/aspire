@@ -3,41 +3,37 @@
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-// Both app registrations must already exist in your tenant; README.md shows how to create them. The dashboard prompts for
+// The shared web app registration must already exist in your tenant; README.md shows how to create it. The dashboard prompts for
 // any of these values that isn't already in user secrets.
 var tenantId = builder.AddParameter("entra-tenant-id")
-    .WithDescription("The **Directory (tenant) ID** shown on the Overview page of either app registration.", enableMarkdown: true);
-var apiClientId = builder.AddParameter("entra-api-client-id")
-    .WithDescription("The **Application (client) ID** of the `weather-api` app registration.", enableMarkdown: true);
+    .WithDescription("The **Directory (tenant) ID** shown on the Overview page of the app registration.", enableMarkdown: true);
 var webClientId = builder.AddParameter("entra-web-client-id")
     .WithDescription("The **Application (client) ID** of the `weather-web` app registration.", enableMarkdown: true);
-var webClientSecret = builder.AddParameter("entra-web-client-secret", secret: true)
-    .WithDescription("The **Value** of a client secret created under **Certificates & secrets** on the `weather-web` app registration.", enableMarkdown: true);
-
-// The API only validates the access tokens that callers send, so it needs no credential of its own.
-var entraApi = builder.AddEntraIdApplication("entra-api")
-    .AsExistingApplication(tenantId, apiClientId);
-
-// The web front end redeems authorization codes and requests tokens for the API, which Entra ID only allows for a client
-// that proves its identity with a credential.
+// Both front ends validate ID tokens returned by Entra ID, without redeeming codes or using a client credential.
 var entraWeb = builder.AddEntraIdApplication("entra-web")
-    .AsExistingApplication(tenantId, webClientId)
-    .WithClientSecret(webClientSecret);
-
-// WaitFor holds each app back until its Entra ID resource has validated the IDs, so a typo shows up on the Entra ID
-// resource instead of as a sign-in failure.
-var apiService = builder.AddProject<Projects.EntraId_ApiService>("apiservice")
-    .WithReference(entraApi)
-    .WaitFor(entraApi);
+    .AsExistingApplication(tenantId, webClientId);
 
 builder.AddProject<Projects.EntraId_Web>("webfrontend")
     .WithExternalHttpEndpoints()
-    .WithReference(entraWeb)
-    .WaitFor(entraWeb)
-    .WithReference(apiService)
-    // The scope the front end requests when it calls the API: the API's Application ID URI followed by the scope name.
-    // Both come from the "Expose an API" step in README.md.
-    .WithEnvironment("WeatherApi__Scopes__0", ReferenceExpression.Create($"api://{apiClientId}/access_as_user"));
+    .WithReference(entraWeb);
+
+// This independent Node front end shares the web registration, but doesn't call the .NET front end.
+// Keep its public HTTPS port stable so its callback matches the registered redirect URI.
+#pragma warning disable ASPIRECERTIFICATES001
+var nodeWeb = builder.AddNodeApp("nodefrontend", "../EntraId.NodeWeb", "server.mjs")
+    .WithHttpsEndpoint(port: 7252, env: "PORT")
+    .WithHttpsDeveloperCertificate()
+    .WithHttpsCertificateConfiguration(ctx =>
+    {
+        ctx.EnvironmentVariables["HTTPS_CERT_FILE"] = ctx.CertificatePath;
+        ctx.EnvironmentVariables["HTTPS_CERT_KEY_FILE"] = ctx.KeyPath;
+        return Task.CompletedTask;
+    })
+    .WithExternalHttpEndpoints()
+    .WithReference(entraWeb);
+#pragma warning restore ASPIRECERTIFICATES001
+
+nodeWeb.WithEnvironment("NODE_WEB_BASE_URL", nodeWeb.GetEndpoint("https"));
 
 #if !SKIP_DASHBOARD_REFERENCE
 // This project is only added in playground projects to support development/debugging

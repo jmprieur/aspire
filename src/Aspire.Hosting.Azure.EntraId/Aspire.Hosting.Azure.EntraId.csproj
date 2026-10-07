@@ -19,7 +19,6 @@
 
   <ItemGroup>
     <Compile Include="$(SharedDir)EnvironmentVariableNameEncoder.cs" LinkBase="Shared" />
-    <Compile Include="$(SharedDir)OverloadResolutionPriorityAttribute.cs" LinkBase="Shared" />
   </ItemGroup>
 
 </Project>

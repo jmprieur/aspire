@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Immutable;
-using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure;
 using Microsoft.Extensions.Logging;
@@ -698,15 +698,24 @@ public static class EntraIdResourceExtensions
     }
 
     /// <summary>
-    /// Injects Entra ID authentication configuration into a .NET program using Microsoft.Identity.Web configuration names.
+    /// Injects Entra ID authentication configuration into a consuming resource.
     /// </summary>
     /// <typeparam name="T">The type of the destination resource.</typeparam>
     /// <param name="builder">The resource that will receive the authentication configuration.</param>
     /// <param name="source">The Entra ID application resource to reference.</param>
-    /// <param name="configSectionName">The configuration section name used as the environment variable prefix, with <c>:</c> replaced by <c>__</c>. When <see langword="null"/>, uses <c>"AzureAd"</c>.</param>
+    /// <param name="connectionName">
+    /// The environment variable prefix. When <see langword="null"/>, uses <c>"AzureAd"</c> for .NET program resources;
+    /// otherwise, uses the source resource's name encoded as a portable environment variable name and uppercased.
+    /// When empty, omits the prefix and its separator, producing <c>ClientId</c> for .NET program resources and <c>CLIENT_ID</c> for other resources.
+    /// For .NET program resources, <c>:</c> in the name is replaced by <c>__</c>.
+    /// </param>
     /// <returns>The resource builder for chaining.</returns>
     /// <remarks>
     /// <para>
+    /// .NET program resources use <c>__</c> between keys and array indexes; other resources use <c>_</c>.
+    /// Non-.NET environment variable names, including custom connection names, use uppercase snake case,
+    /// such as <c>ENTRA_API_CLIENT_ID</c> and <c>ENTRA_API_CLIENT_CREDENTIALS_0_SOURCE_TYPE</c>.
+    /// Configuration values retain their original casing.
     /// The default names, such as <c>AzureAd__TenantId</c> and <c>AzureAd__ClientId</c>, map to the
     /// <c>AzureAd</c> configuration section in .NET and are compatible with Microsoft.Identity.Web.
     /// </para>
@@ -729,77 +738,50 @@ public static class EntraIdResourceExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    // The marker selects .NET defaults without making Entra references experimental.
-#pragma warning disable ASPIREPROJECTS001
-    [OverloadResolutionPriority(1)]
     public static IResourceBuilder<T> WithReference<T>(
         this IResourceBuilder<T> builder,
         IResourceBuilder<EntraIdApplicationResource> source,
-        string? configSectionName = null)
-        where T : IResourceWithEnvironment, IDotnetProgramResource
-    {
-        ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(source);
-        configSectionName ??= "AzureAd";
-        ArgumentException.ThrowIfNullOrEmpty(configSectionName);
-
-        return WithReferenceCore(builder, source, configSectionName.Replace(":", "__", StringComparison.Ordinal), "__");
-    }
-#pragma warning restore ASPIREPROJECTS001
-
-    /// <summary>
-    /// Injects Entra ID authentication configuration into a consuming resource using configurable environment variable names.
-    /// </summary>
-    /// <typeparam name="T">The type of the destination resource.</typeparam>
-    /// <param name="builder">The resource that will receive the authentication configuration.</param>
-    /// <param name="source">The Entra ID application resource to reference.</param>
-    /// <param name="prefix">
-    /// The environment variable prefix. When <see langword="null"/>, uses the source resource's name encoded as a portable environment variable name and uppercased.
-    /// For example, <c>"entra-api"</c> becomes <c>"ENTRA_API"</c>.
-    /// </param>
-    /// <param name="separator">The separator between configuration keys, including nested keys and array indexes. Can be empty to concatenate keys without separators. When <see langword="null"/>, uses <c>"_"</c>.</param>
-    /// <returns>The resource builder for chaining.</returns>
-    /// <remarks>
-    /// Property names and casing are preserved. Applications map the values into their authentication library's options.
-    /// </remarks>
-    /// <example>
-    /// <code lang="csharp">
-    /// builder.AddContainer("worker", "my-worker-image")
-    ///     .WithReference(entra, prefix: "AUTH", separator: "_");
-    /// </code>
-    /// </example>
-    public static IResourceBuilder<T> WithReference<T>(
-        this IResourceBuilder<T> builder,
-        IResourceBuilder<EntraIdApplicationResource> source,
-        string? prefix = null,
-        string? separator = null)
+        string? connectionName = null)
         where T : IResourceWithEnvironment
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(source);
-        prefix ??= EnvironmentVariableNameEncoder.Encode(source.Resource.Name).ToUpperInvariant();
-        separator ??= "_";
-        ArgumentException.ThrowIfNullOrEmpty(prefix);
 
-        return WithReferenceCore(builder, source, prefix, separator);
+        // Inspect the resource itself so .NET defaults also apply when the builder's type has been erased.
+#pragma warning disable ASPIREPROJECTS001
+        var isDotnetProgram = builder.Resource is IDotnetProgramResource;
+#pragma warning restore ASPIREPROJECTS001
+        connectionName ??= isDotnetProgram ? "AzureAd" : EnvironmentVariableNameEncoder.Encode(source.Resource.Name);
+
+        if (isDotnetProgram)
+        {
+            connectionName = connectionName.Replace(":", "__", StringComparison.Ordinal);
+        }
+
+        return WithReferenceCore(builder, source, connectionName, isDotnetProgram);
     }
 
     private static IResourceBuilder<T> WithReferenceCore<T>(
         IResourceBuilder<T> builder,
         IResourceBuilder<EntraIdApplicationResource> source,
-        string prefix,
-        string separator)
+        string connectionName,
+        bool isDotnetProgram)
         where T : IResourceWithEnvironment
     {
         var entra = source.Resource;
+        var separator = isDotnetProgram ? "__" : "_";
+        var keyPrefix = connectionName.Length == 0 ? "" : $"{connectionName}{separator}";
 
         // Create a reference relationship so the dashboard shows the connection
         builder.WithReferenceRelationship(entra);
 
         builder.WithEnvironment(context =>
         {
+            // Collect only this reference's settings so normalization never changes unrelated environment variables.
+            var environmentVariables = new Dictionary<string, object>();
+
             // Core identity properties
-            context.EnvironmentVariables[$"{prefix}{separator}Instance"] = entra.Instance;
+            environmentVariables[$"{keyPrefix}Instance"] = entra.Instance;
 
             // Microsoft.Identity.Web builds the sign-in authority from Instance and TenantId, so TenantId decides who can
             // sign in. Audiences beyond the home tenant need a keyword such as "organizations" there, but a keyword can't
@@ -809,69 +791,81 @@ public static class EntraIdResourceExtensions
             object? homeTenantId = (object?)entra.TenantIdParameter ?? entra.TenantId;
             if (entra.SignInTenantKeyword is { } signInTenantKeyword)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}TenantId"] = signInTenantKeyword;
+                environmentVariables[$"{keyPrefix}TenantId"] = signInTenantKeyword;
 
                 if (homeTenantId is not null)
                 {
-                    context.EnvironmentVariables[$"{prefix}{separator}AppHomeTenantId"] = homeTenantId;
+                    environmentVariables[$"{keyPrefix}AppHomeTenantId"] = homeTenantId;
                 }
             }
             else if (homeTenantId is not null)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}TenantId"] = homeTenantId;
+                environmentVariables[$"{keyPrefix}TenantId"] = homeTenantId;
             }
 
             if (entra.ClientIdParameter is not null)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}ClientId"] = entra.ClientIdParameter;
+                environmentVariables[$"{keyPrefix}ClientId"] = entra.ClientIdParameter;
             }
             else if (entra.ClientId is not null)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}ClientId"] = entra.ClientId;
+                environmentVariables[$"{keyPrefix}ClientId"] = entra.ClientId;
             }
 
             // Send the x5c claim only when explicitly requested. It enables certificate rollover but
             // is only meaningful for certificate credentials, so it is opt-in via WithSendX5C().
             if (entra.SendX5C)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}SendX5C"] = "true";
+                environmentVariables[$"{keyPrefix}SendX5C"] = "true";
             }
 
             // Token acquisition
             if (entra.AzureRegion is not null)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}AzureRegion"] = entra.AzureRegion;
+                environmentVariables[$"{keyPrefix}AzureRegion"] = entra.AzureRegion;
             }
 
             // Client credentials — each type emits its own env vars
             for (var i = 0; i < entra.ClientCredentials.Count; i++)
             {
-                var credPrefix = $"{prefix}{separator}ClientCredentials{separator}{i}";
-                entra.ClientCredentials[i].EmitEnvironmentVariables(context.EnvironmentVariables, credPrefix, separator);
+                var credPrefix = $"{keyPrefix}ClientCredentials{separator}{i}";
+                entra.ClientCredentials[i].EmitEnvironmentVariables(environmentVariables, credPrefix, separator);
             }
 
             // Client capabilities (e.g., "cp1" for CAE)
             for (var i = 0; i < entra.ClientCapabilities.Count; i++)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}ClientCapabilities{separator}{i}"] = entra.ClientCapabilities[i];
+                environmentVariables[$"{keyPrefix}ClientCapabilities{separator}{i}"] = entra.ClientCapabilities[i];
             }
 
             // Audiences
             for (var i = 0; i < entra.Audiences.Count; i++)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}Audiences{separator}{i}"] = entra.Audiences[i];
+                environmentVariables[$"{keyPrefix}Audiences{separator}{i}"] = entra.Audiences[i];
             }
 
             // Web API authorization
             if (entra.AllowWebApiToBeAuthorizedByACL)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}AllowWebApiToBeAuthorizedByACL"] = "true";
+                environmentVariables[$"{keyPrefix}AllowWebApiToBeAuthorizedByACL"] = "true";
             }
 
             // Extra query parameters
             foreach (var kvp in entra.ExtraQueryParameters)
             {
-                context.EnvironmentVariables[$"{prefix}{separator}ExtraQueryParameters{separator}{kvp.Key}"] = kvp.Value;
+                environmentVariables[$"{keyPrefix}ExtraQueryParameters{separator}{kvp.Key}"] = kvp.Value;
+            }
+
+            if (!isDotnetProgram)
+            {
+                environmentVariables = environmentVariables.ToDictionary(
+                    kvp => JsonNamingPolicy.SnakeCaseUpper.ConvertName(EnvironmentVariableNameEncoder.Encode(kvp.Key)),
+                    kvp => kvp.Value);
+            }
+
+            foreach (var variable in environmentVariables)
+            {
+                context.EnvironmentVariables[variable.Key] = variable.Value;
             }
         });
 
