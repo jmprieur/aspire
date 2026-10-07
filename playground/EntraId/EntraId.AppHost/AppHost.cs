@@ -6,9 +6,10 @@ var builder = DistributedApplication.CreateBuilder(args);
 // The shared web app registration must already exist in your tenant; README.md shows how to create it. The dashboard prompts for
 // any of these values that isn't already in user secrets.
 var tenantId = builder.AddParameter("entra-tenant-id")
-    .WithDescription("The **Directory (tenant) ID** shown on the Overview page of the app registration.", enableMarkdown: true);
+    .WithDescription("The **Directory (tenant) ID** shown on the Overview page of the existing `weather-web` app registration shared by the .NET and Node front ends.", enableMarkdown: true);
 var webClientId = builder.AddParameter("entra-web-client-id")
-    .WithDescription("The **Application (client) ID** of the `weather-web` app registration.", enableMarkdown: true);
+    .WithDescription("The **Application (client) ID** shown on the Overview page of the existing `weather-web` app registration shared by the .NET and Node front ends. Enable **ID tokens (used for implicit and hybrid flows)** and configure both apps' redirect URIs as described in README.md. No client secret is required.", enableMarkdown: true);
+
 // Both front ends validate ID tokens returned by Entra ID, without redeeming codes or using a client credential.
 var entraWeb = builder.AddEntraIdApplication("entra-web")
     .AsExistingApplication(tenantId, webClientId);

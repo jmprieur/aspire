@@ -47,7 +47,7 @@ to double underscores; for example, `"Authentication:AzureAd"` produces `Authent
 
 ```csharp
 var customApi = builder.AddProject<Projects.Api>("custom-api")
-                       .WithReference(entraApi, connectionName: "AzureAdApi")
+                       .WithReference(entraApi, connectionName: "Authentication:AzureAd")
                        .WaitFor(entraApi);
 ```
 
