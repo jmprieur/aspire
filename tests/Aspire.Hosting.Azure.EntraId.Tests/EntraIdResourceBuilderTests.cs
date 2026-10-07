@@ -1155,6 +1155,93 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
+    public void WithCredential_ThrowsWhenClientSecretParameterIsNotSecret()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var notSecret = appBuilder.AddParameter("EntraSecret");
+        var entra = appBuilder.AddEntraIdApplication("entra-web");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.WithCredential(new EntraIdClientSecretCredential
+        {
+            ClientSecret = notSecret.Resource
+        }));
+
+        Assert.Equal(nameof(EntraIdClientSecretCredential.ClientSecret), exception.ParamName);
+        Assert.Empty(entra.Resource.ClientCredentials);
+    }
+
+    [Fact]
+    public void WithCredential_ThrowsWhenCertificatePasswordParameterIsNotSecret()
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var notSecret = appBuilder.AddParameter("CertPassword");
+        var entra = appBuilder.AddEntraIdApplication("entra-web");
+
+        var exception = Assert.Throws<ArgumentException>(() => entra.WithCredential(new EntraIdFileCertificateCredential
+        {
+            FilePath = "/certs/app.pfx",
+            Password = notSecret.Resource
+        }));
+
+        Assert.Equal(nameof(EntraIdFileCertificateCredential.Password), exception.ParamName);
+        Assert.Empty(entra.Resource.ClientCredentials);
+    }
+
+    [Theory]
+    [InlineData(DistributedApplicationOperation.Run, false)]
+    [InlineData(DistributedApplicationOperation.Publish, false)]
+    [InlineData(DistributedApplicationOperation.Run, true)]
+    [InlineData(DistributedApplicationOperation.Publish, true)]
+    public async Task WithCredential_SecretParametersFlowThroughEnvironment(DistributedApplicationOperation operation, bool dotnet)
+    {
+        using var appBuilder = TestDistributedApplicationBuilder.Create();
+        var secret = appBuilder.AddParameter("EntraSecret", "client-secret", secret: true);
+        var password = appBuilder.AddParameter("CertPassword", "certificate-password", secret: true);
+        var replacement = appBuilder.AddParameter("ReplacementPassword", "replacement-password", secret: true);
+        var notSecret = appBuilder.AddParameter("NotSecret");
+        var certificate = new EntraIdFileCertificateCredential
+        {
+            FilePath = "/certs/app.pfx",
+            Password = password.Resource
+        };
+        var entra = appBuilder.AddEntraIdApplication("entra-web")
+            .WithCredential(new EntraIdClientSecretCredential { ClientSecret = secret.Resource })
+            .WithCredential(certificate);
+
+        Assert.Same(password.Resource, certificate.Password);
+        certificate.Password = null;
+        Assert.Null(certificate.Password);
+        certificate.Password = replacement.Resource;
+
+        IResourceBuilder<IResourceWithEnvironment> consumer = dotnet
+            ? appBuilder.AddResource(new ProjectResource("web"))
+            : appBuilder.AddContainer("web", "myimage");
+        consumer.WithReference(entra);
+        var env = await EnvironmentVariableEvaluator.GetEnvironmentVariablesAsync(
+            consumer.Resource, operation, TestServiceProvider.Instance);
+
+        var expectedSecret = operation == DistributedApplicationOperation.Run ? "client-secret" : "{EntraSecret.value}";
+        var expectedPassword = operation == DistributedApplicationOperation.Run ? "replacement-password" : "{ReplacementPassword.value}";
+        Assert.Equal(dotnet ? new Dictionary<string, string>
+        {
+            ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
+            ["AzureAd__ClientCredentials__0__SourceType"] = "ClientSecret",
+            ["AzureAd__ClientCredentials__0__ClientSecret"] = expectedSecret,
+            ["AzureAd__ClientCredentials__1__SourceType"] = "Path",
+            ["AzureAd__ClientCredentials__1__CertificateDiskPath"] = "/certs/app.pfx",
+            ["AzureAd__ClientCredentials__1__CertificatePassword"] = expectedPassword
+        } : new Dictionary<string, string>
+        {
+            ["ENTRA_WEB_INSTANCE"] = "https://login.microsoftonline.com/",
+            ["ENTRA_WEB_CLIENT_CREDENTIALS_0_SOURCE_TYPE"] = "ClientSecret",
+            ["ENTRA_WEB_CLIENT_CREDENTIALS_0_CLIENT_SECRET"] = expectedSecret,
+            ["ENTRA_WEB_CLIENT_CREDENTIALS_1_SOURCE_TYPE"] = "Path",
+            ["ENTRA_WEB_CLIENT_CREDENTIALS_1_CERTIFICATE_DISK_PATH"] = "/certs/app.pfx",
+            ["ENTRA_WEB_CLIENT_CREDENTIALS_1_CERTIFICATE_PASSWORD"] = expectedPassword
+        }, env);
+    }
+
+    [Fact]
     public void EntraIdApplicationResource_CreatesResource()
     {
         var resource = new EntraIdApplicationResource("entra-api");

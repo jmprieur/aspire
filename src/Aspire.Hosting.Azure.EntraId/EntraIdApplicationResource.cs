@@ -229,7 +229,20 @@ public sealed class EntraIdClientSecretCredential : EntraIdClientCredential
     /// <summary>
     /// Gets the client secret as a parameter resource.
     /// </summary>
-    public required ParameterResource ClientSecret { get; init; }
+    public required ParameterResource ClientSecret
+    {
+        get;
+        init
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (!value.Secret)
+            {
+                throw new ArgumentException("The client secret parameter must be marked as secret. Use AddParameter with secret: true when creating the parameter.", nameof(ClientSecret));
+            }
+
+            field = value;
+        }
+    }
 
     /// <inheritdoc />
     internal override void EmitEnvironmentVariables(IDictionary<string, object> envVars, string prefix, string separator)
@@ -411,8 +424,21 @@ public sealed class EntraIdFileCertificateCredential : EntraIdClientCredential
     /// <remarks>
     /// This is a <see cref="ParameterResource"/> rather than a <see cref="string"/> so the value flows through
     /// Aspire's parameter pipeline and is redacted in logs and the dashboard like any other secret.
+    /// The parameter must be created with <c>secret: true</c>.
     /// </remarks>
-    public ParameterResource? Password { get; set; }
+    public ParameterResource? Password
+    {
+        get;
+        set
+        {
+            if (value is { Secret: false })
+            {
+                throw new ArgumentException("The certificate password parameter must be marked as secret. Use AddParameter with secret: true when creating the parameter.", nameof(Password));
+            }
+
+            field = value;
+        }
+    }
 
     /// <inheritdoc />
     internal override void EmitEnvironmentVariables(IDictionary<string, object> envVars, string prefix, string separator)
