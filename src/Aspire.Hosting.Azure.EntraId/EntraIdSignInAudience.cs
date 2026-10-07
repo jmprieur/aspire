@@ -24,7 +24,7 @@ public enum EntraIdSignInAudience
     /// <summary>
     /// Only work or school accounts in the app's home tenant can sign in. This is the default.
     /// </summary>
-    AzureADMyOrg,
+    AzureADMyOrg = 0,
 
     /// <summary>
     /// Work or school accounts in any Microsoft Entra tenant can sign in.
