@@ -397,25 +397,6 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
-    public void AddEntraIdApplication_WithManagedCertificate()
-    {
-        var appBuilder = DistributedApplication.CreateBuilder();
-
-        appBuilder.AddEntraIdApplication("entra-web")
-            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
-            .WithManagedCertificate();
-
-        using var app = appBuilder.Build();
-
-        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
-
-        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Single(resource.ClientCredentials);
-        var cred = Assert.IsType<EntraIdManagedCertificateCredential>(resource.ClientCredentials[0]);
-        Assert.Equal("ManagedCertificate", cred.SourceType);
-    }
-
-    [Fact]
     public void AddEntraIdApplication_MultipleCredentials()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
@@ -857,7 +838,6 @@ public class EntraIdResourceBuilderTests
                 Password = password.Resource
             })
             .WithCredential(new EntraIdSignedAssertionFileCredential { FilePath = "/var/run/secrets/token" })
-            .WithCredential(new EntraIdManagedCertificateCredential())
             .WithSendX5C()
             .WithAzureRegion("westus2")
             .WithClientCapability("cp1")
@@ -908,7 +888,6 @@ public class EntraIdResourceBuilderTests
             [$"ENTRA{separator}ClientCredentials{separator}5{separator}CertificatePassword"] = operation == DistributedApplicationOperation.Run ? "certificate-password" : "{CertPassword.value}",
             [$"ENTRA{separator}ClientCredentials{separator}6{separator}SourceType"] = "SignedAssertionFilePath",
             [$"ENTRA{separator}ClientCredentials{separator}6{separator}SignedAssertionFileDiskPath"] = "/var/run/secrets/token",
-            [$"ENTRA{separator}ClientCredentials{separator}7{separator}SourceType"] = "ManagedCertificate",
             [$"ENTRA{separator}ClientCapabilities{separator}0"] = "cp1",
             [$"ENTRA{separator}ClientCapabilities{separator}1"] = "cp2",
             [$"ENTRA{separator}Audiences{separator}0"] = $"api://{ClientId}",
@@ -948,7 +927,6 @@ public class EntraIdResourceBuilderTests
                 ["ENTRA_CLIENT_CREDENTIALS_5_CERTIFICATE_PASSWORD"] = operation == DistributedApplicationOperation.Run ? "certificate-password" : "{CertPassword.value}",
                 ["ENTRA_CLIENT_CREDENTIALS_6_SOURCE_TYPE"] = "SignedAssertionFilePath",
                 ["ENTRA_CLIENT_CREDENTIALS_6_SIGNED_ASSERTION_FILE_DISK_PATH"] = "/var/run/secrets/token",
-                ["ENTRA_CLIENT_CREDENTIALS_7_SOURCE_TYPE"] = "ManagedCertificate",
                 ["ENTRA_CLIENT_CAPABILITIES_0"] = "cp1",
                 ["ENTRA_CLIENT_CAPABILITIES_1"] = "cp2",
                 ["ENTRA_AUDIENCES_0"] = $"api://{ClientId}",
