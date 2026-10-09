@@ -587,23 +587,6 @@ public static class EntraIdResourceExtensions
     }
 
     /// <summary>
-    /// Configures the Azure region for optimized token acquisition.
-    /// </summary>
-    /// <param name="builder">The resource builder.</param>
-    /// <param name="azureRegion">The Azure region (e.g., <c>"westus2"</c>) or <c>"TryAutoDetect"</c>.</param>
-    /// <returns>The resource builder for chaining.</returns>
-    public static IResourceBuilder<EntraIdApplicationResource> WithAzureRegion(
-        this IResourceBuilder<EntraIdApplicationResource> builder,
-        string azureRegion)
-    {
-        ArgumentNullException.ThrowIfNull(builder);
-        ArgumentException.ThrowIfNullOrEmpty(azureRegion);
-
-        builder.Resource.AzureRegion = azureRegion;
-        return builder;
-    }
-
-    /// <summary>
     /// Enables ACL-based authorization for daemon-to-API scenarios.
     /// </summary>
     /// <param name="builder">The resource builder.</param>
@@ -792,12 +775,6 @@ public static class EntraIdResourceExtensions
             if (entra.SendX5C)
             {
                 environmentVariables[$"{keyPrefix}SendX5C"] = "true";
-            }
-
-            // Token acquisition
-            if (entra.AzureRegion is not null)
-            {
-                environmentVariables[$"{keyPrefix}AzureRegion"] = entra.AzureRegion;
             }
 
             // Client credentials — each type emits its own env vars

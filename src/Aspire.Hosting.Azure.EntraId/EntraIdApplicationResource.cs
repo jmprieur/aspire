@@ -134,15 +134,6 @@ public class EntraIdApplicationResource : Resource
     internal List<string> ClientCapabilities { get; } = [];
 
     /// <summary>
-    /// Gets or sets the Azure region for optimized token acquisition.
-    /// </summary>
-    /// <remarks>
-    /// Use <c>"TryAutoDetect"</c> to have the app attempt to detect the region automatically.
-    /// Per deployment — typically the same for all apps in a deployment.
-    /// </remarks>
-    public string? AzureRegion { get; set; }
-
-    /// <summary>
     /// Gets or sets whether to send the <c>x5c</c> claim (the public key of the certificate) with the token request.
     /// </summary>
     /// <remarks>

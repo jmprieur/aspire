@@ -285,23 +285,6 @@ public class EntraIdResourceBuilderTests
     }
 
     [Fact]
-    public void AddEntraIdApplication_WithAzureRegion()
-    {
-        var appBuilder = DistributedApplication.CreateBuilder();
-
-        appBuilder.AddEntraIdApplication("entra-api")
-            .AsExistingApplication(tenantId: TenantId, clientId: ClientId)
-            .WithAzureRegion("TryAutoDetect");
-
-        using var app = appBuilder.Build();
-
-        var appModel = app.Services.GetRequiredService<DistributedApplicationModel>();
-
-        var resource = Assert.Single(appModel.Resources.OfType<EntraIdApplicationResource>());
-        Assert.Equal("TryAutoDetect", resource.AzureRegion);
-    }
-
-    [Fact]
     public void AddEntraIdApplication_WithACLAuthorization()
     {
         var appBuilder = DistributedApplication.CreateBuilder();
@@ -451,7 +434,6 @@ public class EntraIdResourceBuilderTests
             .WithClientSecret(secret)
             .WithAudience($"api://{ClientId}")
             .WithClientCapability("cp1")
-            .WithAzureRegion("westus2")
             .WithAllowWebApiToBeAuthorizedByACL()
             .WithExtraQueryParameter("dc", "prod-wst-01");
 
@@ -466,7 +448,6 @@ public class EntraIdResourceBuilderTests
             ["AzureAd__Instance"] = "https://login.microsoftonline.com/",
             ["AzureAd__TenantId"] = TenantId,
             ["AzureAd__ClientId"] = ClientId,
-            ["AzureAd__AzureRegion"] = "westus2",
             ["AzureAd__ClientCredentials__0__SourceType"] = "ClientSecret",
             ["AzureAd__ClientCredentials__0__ClientSecret"] = "super-secret",
             ["AzureAd__ClientCapabilities__0"] = "cp1",
@@ -839,7 +820,6 @@ public class EntraIdResourceBuilderTests
             })
             .WithCredential(new EntraIdSignedAssertionFileCredential { FilePath = "/var/run/secrets/token" })
             .WithSendX5C()
-            .WithAzureRegion("westus2")
             .WithClientCapability("cp1")
             .WithClientCapability("cp2")
             .WithAudience($"api://{ClientId}")
@@ -867,7 +847,6 @@ public class EntraIdResourceBuilderTests
             [$"ENTRA{separator}AppHomeTenantId"] = operation == DistributedApplicationOperation.Run ? TenantId : "{EntraTenantId.value}",
             [$"ENTRA{separator}ClientId"] = operation == DistributedApplicationOperation.Run ? ClientId : "{EntraClientId.value}",
             [$"ENTRA{separator}SendX5C"] = "true",
-            [$"ENTRA{separator}AzureRegion"] = "westus2",
             [$"ENTRA{separator}ClientCredentials{separator}0{separator}SourceType"] = "ClientSecret",
             [$"ENTRA{separator}ClientCredentials{separator}0{separator}ClientSecret"] = operation == DistributedApplicationOperation.Run ? "super-secret" : "{EntraSecret.value}",
             [$"ENTRA{separator}ClientCredentials{separator}1{separator}SourceType"] = "SignedAssertionFromManagedIdentity",
